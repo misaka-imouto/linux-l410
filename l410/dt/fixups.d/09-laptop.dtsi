@@ -13,6 +13,7 @@
 	compatible = "huawei-keyboard", "hid-over-i2c";
 	interrupts-extended = <&{/amba/gpio@fa8b1000} 0 2>;
 	/delete-property/ irq_gpio;
+	wakeup-source;
 };
 
 // Touchpad: Goodix 27C6:01E0 on this unit; other units carry an Elan part at 0x15.
