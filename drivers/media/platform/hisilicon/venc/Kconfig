@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config VIDEO_HISI_VENC
+	tristate "HiSilicon Kirin 990 video encoder"
+	depends on V4L_MEM2MEM_DRIVERS
+	depends on VIDEO_DEV
+	depends on ARCH_HISI || COMPILE_TEST
+	select MEDIA_CONTROLLER
+	select VIDEOBUF2_DMA_SG
+	select V4L2_MEM2MEM_DEV
+	select IOMMU_IO_PGTABLE_LPAE
+	select GENERIC_ALLOCATOR
+	help
+	  Stateful V4L2 mem2mem video encoder for the VEDU block of the HiSilicon
+	  Kirin 990 video codec (VCodec V500). Supports H.264 and HEVC (H.265).
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called hisi-venc.
