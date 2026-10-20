@@ -862,9 +862,9 @@ retry:
 			retry_count++;
 			if (retry_count > 50) {
 				tloge("SMC_EXIT_PREEMPTED retry count %d exceeded!\n", retry_count);
-				break;
+			} else {
+				goto retry;
 			}
-			goto retry;
 		}
 	}
 #if (CONFIG_CPU_AFF_NR != 0) || (defined CONFIG_CPU_BINDING)
@@ -1729,7 +1729,6 @@ static enum pending_t proc_ta_pending(struct pending_entry *pe,
 	 * receive a signal.
 	 */
 	uint32_t timeout = (uint32_t)pending_args;
-	bool timer_no_irq = (pending_args >> 32) == 0 ? false : true;
 	uint32_t cur_timeout;
 
 	if (is_cmd_working_done(cmd_index)) {
@@ -1742,7 +1741,7 @@ static enum pending_t proc_ta_pending(struct pending_entry *pe,
 		init_timeout_step(timeout, step);
 	if (!current->mm)
 		kernel_call = true;
-resleep:
+
 	if (is_cmd_working_done(cmd_index)) {
 		tlogi("cmd %u done before wait\n", cmd_index);
 		atomic_set(&pe->run, 0);

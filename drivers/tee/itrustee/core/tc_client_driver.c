@@ -160,7 +160,7 @@ static int handle_groupid_cmd(uint32_t vmid, uint32_t nsid, uint32_t cmd)
 	return ret;
 }
 
-static int tc_ns_operate_vm_nsid_vmid(const struct tc_ns_dev_file *dev_file, const void *argp, unsigned int cmd)
+static int tc_ns_operate_vm_nsid_vmid(struct tc_ns_dev_file *dev_file, const void *argp, unsigned int cmd)
 {
 	struct_group group = { 0 };
 	if (copy_from_user(&group, argp, sizeof(struct_group))) {
