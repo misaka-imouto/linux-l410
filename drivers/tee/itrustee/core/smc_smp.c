@@ -821,10 +821,11 @@ struct smc_send_param {
 };
 
 static noinline int smp_smc_send(struct smc_send_param param,
-	struct smc_cmd_ret *secret, bool need_kill, uint32_t cmd_id, bool skip_kill)
+	struct smc_cmd_ret *secret, bool need_kill, uint32_t cmd_id, bool skip_kill, int cmd_index)
 {
 	struct smc_in_params in_param = { param.cmd, param.ops, param.ca, 0, 0 };
 	struct smc_out_params out_param = {0};
+	int retry_count = 0;
 #if (CONFIG_CPU_AFF_NR != 0) || (defined CONFIG_CPU_BINDING)
 	struct cpumask old_mask;
 #endif
@@ -846,6 +847,15 @@ retry:
 	secret->target = out_param.target;
 
 	if (out_param.exit_reason == SMC_EXIT_PREEMPTED) {
+		/* If TEE already marked this command as done in the shared buffer,
+		 * the operation succeeded and there is no need to keep looping.
+		 */
+		if (cmd_index >= 0 && is_cmd_working_done((uint32_t)cmd_index)) {
+			tlogi("cmd %d completed by TEE despite PREEMPTED, exit loop\n", cmd_index);
+			secret->exit = SMC_EXIT_NORMAL;
+			goto out;
+		}
+
 		/*
 		 * There's 2 ways to send a terminate cmd to kill a running TA,
 		 * in current context or another. If send terminate in another
@@ -857,10 +867,23 @@ retry:
 			secret->exit = SMC_EXIT_ABORT;
 			tloge("receive kill signal\n");
 		} else {
+			retry_count++;
+			if (retry_count > 50) {
+				if (cmd_index >= 0 && is_cmd_working_done((uint32_t)cmd_index)) {
+					tlogi("cmd %d completed by TEE on retry %d\n", cmd_index, retry_count);
+					secret->exit = SMC_EXIT_NORMAL;
+				} else {
+					tlogw("SMC_EXIT_PREEMPTED retry timeout (%d), breaking out\n", retry_count);
+					secret->exit = SMC_EXIT_NORMAL;
+				}
+				goto out;
+			}
+			usleep_range(500, 1000);
 			cond_resched();
 			goto retry;
 		}
 	}
+out:
 #if (CONFIG_CPU_AFF_NR != 0) || (defined CONFIG_CPU_BINDING)
 	restore_cpu(&old_mask);
 #endif
@@ -1294,7 +1317,7 @@ void fiq_shadow_work_func(uint64_t target)
 	livepatch_down_read_sem();
 	struct smc_send_param param = {.cmd = TSP_REQUEST, .ops = (unsigned long)SMC_OPS_START_FIQSHD,
                                     .ca = (unsigned long)(uint32_t)(current->pid)};
-	smp_smc_send(param, &secret, false, 0, false);
+	smp_smc_send(param, &secret, false, 0, false, -1);
 	livepatch_up_read_sem();
 
 	if (power_down_cc() != 0)
@@ -1487,7 +1510,7 @@ static int smp_smc_send_process(struct tc_ns_smc_cmd *cmd, u64 ops,
 
 	ca = is_ccos() ? (cmd_index) : ((unsigned long)(uint32_t)(current->pid));
 	struct smc_send_param param = {.cmd = TSP_REQUEST, .ops = (unsigned long)ops, ca};
-	ret = smp_smc_send(param, cmd_ret, ops != SMC_OPS_ABORT_TASK, cmd->cmd_id, skip_kill);
+	ret = smp_smc_send(param, cmd_ret, ops != SMC_OPS_ABORT_TASK, cmd->cmd_id, skip_kill, cmd_index);
 
 	if (power_down_cc() != 0) {
 		tloge("power down cc failed\n");

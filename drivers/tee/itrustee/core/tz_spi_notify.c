@@ -689,11 +689,8 @@ int tz_spi_init(struct device *class_dev, struct device_node *np)
 
 		ret = send_notify_cmd(GLOBAL_CMD_ID_REGISTER_NOTIFY_MEMORY);
 		if (ret != 0) {
-			tloge("shared memory failed ret is 0x%x\n", ret);
-			ret = -EFAULT;
-			free_spi_mem((uint64_t)(uintptr_t)g_notify_data);
-			g_notify_data = NULL;
-			goto clean;
+			tlogw("register notify memory returned 0x%x, continuing without spi notify\n", ret);
+			ret = 0;
 		}
 
 		g_notify_data_entry_shadow =

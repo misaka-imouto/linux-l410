@@ -574,31 +574,30 @@ static int mailbox_register(const void *mb_pool, unsigned int size)
 	}
 
 	operation->paramtypes = TEE_PARAM_TYPE_VALUE_INPUT |
-		(TEE_PARAM_TYPE_VALUE_INPUT << TEE_PARAM_NUM);
+		(TEE_PARAM_TYPE_VALUE_INOUT << TEE_PARAM_NUM);
 	operation->params[0].value.a = mailbox_virt_to_phys((uintptr_t)mb_pool);
 	operation->params[0].value.b =
 		(uint64_t)mailbox_virt_to_phys((uintptr_t)mb_pool) >> ADDR_TRANS_NUM;
 	operation->params[1].value.a = size;
-	operation->params[1].value.b = 0;
 
 	smc_cmd->cmd_type = CMD_TYPE_GLOBAL;
 	smc_cmd->cmd_id = GLOBAL_CMD_ID_REGISTER_MAILBOX;
 	smc_cmd->operation_phys = mailbox_virt_to_phys((uintptr_t)operation);
 	smc_cmd->operation_h_phys =
 		(uint64_t)mailbox_virt_to_phys((uintptr_t)operation) >> ADDR_TRANS_NUM;
-    smc_cmd->nsid = task_active_pid_ns(current)->ns.inum;
-    smc_cmd->vmid = get_ree_load_mode() == REE_VIRTUAL ? REE_VIRTUAL_HOST_VMID : REE_CONTAINER_HOST_VMID;
+
 	if (is_tee_rebooting())
 		ret = send_smc_cmd_rebooting(TSP_REQUEST, smc_cmd);
 	else
-		ret= tc_ns_smc(smc_cmd);
+		ret = tc_ns_smc(smc_cmd);
 
 	if (ret != 0) {
 		tloge("resigter mailbox failed, ret=%d\n", ret);
 		ret = -EIO;
 	} else {
-		g_mb_count = 1;
-		tlogi("register mailbox pool success (size=%u)\n", size);
+		if (operation->params[1].value.a <= g_mb_count || g_mb_count == 0)
+			g_mb_count = operation->params[1].value.a;
+		tlogi("wish to register %u mailbox, success %u\n", (uint32_t)MAILBOX_POOL_COUNT, g_mb_count);
 	}
 
 	free_operation((uint64_t)(uintptr_t)operation);
@@ -615,7 +614,9 @@ static void mailbox_debug_init(void)
 
 int re_register_mailbox(void)
 {
+	uint32_t i;
 	int ret = 0;
+	struct mailbox_buffer *buffer = NULL;
 
 	mutex_lock(&g_mb_lock);
 	if (!check_zone()) {
@@ -623,15 +624,25 @@ int re_register_mailbox(void)
 		return -EFAULT;
 	}
 
-	(void)memset_s((void *)mailbox_page_address(g_m_zone[0]->all_pages),
-		MAILBOX_POOL_SIZE, 0, MAILBOX_POOL_SIZE);
+	buffer = (struct mailbox_buffer *)(uintptr_t)get_mailbox_buffer_vaddr(g_mb_count);
+	if (ZERO_OR_NULL_PTR((unsigned long)(uintptr_t)buffer)) {
+		mutex_unlock(&g_mb_lock);
+		return -ENOMEM;
+	}
+	for (i = 0; i < g_mb_count; i++) {
+		(void)memset_s((void *)mailbox_page_address(g_m_zone[i]->all_pages),
+			MAILBOX_POOL_SIZE, 0, MAILBOX_POOL_SIZE);
+		buffer[i].buffer = mailbox_virt_to_phys(mailbox_page_address(g_m_zone[i]->all_pages));
+		buffer[i].size = MAILBOX_POOL_SIZE;
+	}
 	mutex_unlock(&g_mb_lock);
 
-	if (mailbox_register((void *)mailbox_page_address(g_m_zone[0]->all_pages), MAILBOX_POOL_SIZE) != 0) {
-		tloge("re-register mailbox failed\n");
+	if (mailbox_register(buffer, sizeof(struct mailbox_buffer) * g_mb_count) != 0) {
+		tloge("register mailbox failed\n");
 		ret = -EIO;
 	}
 
+	free_mailbox_buffer((uint64_t)(uintptr_t)buffer);
 	return ret;
 }
 
@@ -685,21 +696,34 @@ clear:
 
 static int mailbox_init(uint32_t pool_count, mailbox_page_t **all_pages)
 {
+	uint32_t i;
 	int ret = 0;
-	(void)pool_count;
+	struct mailbox_buffer *buffer = NULL;
 
-	if (mailbox_register((void *)mailbox_page_address(all_pages[0]), MAILBOX_POOL_SIZE) != 0) {
+	buffer = (struct mailbox_buffer *)(uintptr_t)get_mailbox_buffer_vaddr(pool_count);
+	if (ZERO_OR_NULL_PTR((unsigned long)(uintptr_t)buffer))
+		return -ENOMEM;
+	for (i = 0; i < pool_count; i++) {
+		buffer[i].buffer = mailbox_virt_to_phys(mailbox_page_address(all_pages[i]));
+		buffer[i].size = MAILBOX_POOL_SIZE;
+	}
+
+	if (mailbox_register(buffer, sizeof(struct mailbox_buffer) * pool_count) != 0) {
 		tloge("register mailbox failed\n");
-		return -EIO;
+		ret = -EIO;
+		goto clear;
 	}
 
 	if (init_zone(all_pages) != 0) {
 		tloge("mailbox init failed\n");
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto clear;
 	}
 
 	mutex_init(&g_mb_lock);
 	mailbox_debug_init();
+clear:
+	free_mailbox_buffer((uint64_t)(uintptr_t)buffer);
 	return ret;
 }
 
