@@ -39,6 +39,8 @@ int tlogger_store_msg(const char *file_path, uint32_t file_path_len);
 int register_mem_to_teeos(uint64_t mem_addr, uint32_t mem_len, bool is_cache_mem);
 
 int register_tloger_mem(void);
+int init_tlogger_service(void);
+void free_tlogger_service(void);
 
 #else
 static inline void tz_log_write(void)
