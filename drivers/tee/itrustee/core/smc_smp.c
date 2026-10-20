@@ -825,7 +825,6 @@ static noinline int smp_smc_send(struct smc_send_param param,
 {
 	struct smc_in_params in_param = { param.cmd, param.ops, param.ca, 0, 0 };
 	struct smc_out_params out_param = {0};
-	int retry_count = 0;
 #if (CONFIG_CPU_AFF_NR != 0) || (defined CONFIG_CPU_BINDING)
 	struct cpumask old_mask;
 #endif
@@ -838,7 +837,7 @@ retry:
 	tee_trace_add_event(SMC_SEND, 0);
 	send_smc_cmd(&in_param, &out_param, 0);
 	tee_trace_add_event(SMC_DONE, 0);
-	tlogi("[cpu %d] SMC call ret=%lx exit=%lx ta=%lx targ=%lx\n",
+	tlogd("[cpu %d] SMC call ret=%lx exit=%lx ta=%lx targ=%lx\n",
 		raw_smp_processor_id(), out_param.ret, out_param.exit_reason,
 		out_param.ta, out_param.target);
 
@@ -859,14 +858,7 @@ retry:
 			tloge("receive kill signal\n");
 		} else {
 			cond_resched();
-			retry_count++;
-			if (retry_count > 2000) {
-				tloge("SMC_EXIT_PREEMPTED retry count %d exceeded!\n", retry_count);
-			} else {
-				if ((retry_count % 50) == 0)
-					usleep_range(500, 1000);
-				goto retry;
-			}
+			goto retry;
 		}
 	}
 #if (CONFIG_CPU_AFF_NR != 0) || (defined CONFIG_CPU_BINDING)
