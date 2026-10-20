@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: GPL-2.0
+config TZDRIVER
+	tristate "Huawei iTrustee OS TrustZone client driver"
+	default y
+	depends on ARM64
+	help
+	  This driver provides support for communicating with Huawei iTrustee
+	  Secure OS running in ARM TrustZone, creating the /dev/tc_ns_client device node.
+	  It is required for the hardware fingerprint sensor, security enclaves,
+	  and DRM protected media pipelines on Kirin 990 / Huawei Qingyun L410.
+
+	  If unsure, say Y.

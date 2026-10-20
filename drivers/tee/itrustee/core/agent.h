@@ -1,0 +1,154 @@
+/*
+ * agent.h
+ *
+ * agent manager function definition, such as register and send cmd
+ *
+ * Copyright (c) 2012-2022 Huawei Technologies Co., Ltd.
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version 2
+ * of the License, or (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ */
+#ifndef AGENT_H
+#define AGENT_H
+#include <linux/fs.h>
+#include "teek_ns_client.h"
+
+#define MAX_PATH_SIZE         512
+#define AGENT_FS_ID           0x46536673 /* FSfs */
+#define AGENT_MISC_ID         0x4d495343 /* MISC */
+
+#define AGENT_SOCKET_ID       0x69e85664 /* socket */
+#define SECFILE_LOAD_AGENT_ID 0x4c4f4144 /* SECFILE-LOAD-AGENT */
+#define TEE_SECE_AGENT_ID   0x53656345 /* npu agent id */
+#define TEE_FACE_AGENT1_ID  0x46616365 /* face agent id */
+#define TEE_FACE_AGENT2_ID  0x46616345 /* face agent id */
+#define TEE_VLTMM_AGENT_ID  0x564c544d /* vltmm agent id */
+#define SYSTEM_UID          1000
+#define MS_TO_NS            1000000
+
+enum agent_state_type {
+	AGENT_CRASHED = 0,
+	AGENT_REGISTERED,
+	AGENT_READY,
+	AGENT_PENDING,
+	AGENT_UNREGISTERED,
+};
+
+enum agent_status {
+	AGENT_DEAD = 0,
+	AGENT_ALIVE = 1,
+	AGENT_NO_EXIST = 2,
+	AGENT_HAS_CRASHED = 3,
+	AGENT_READY_TO_UNREG = 4,
+};
+
+struct agent_work_info {
+	uint32_t agent_send_wake_up_cnt;
+	uint32_t agent_wait_event_cnt;
+	uint32_t agent_wake_up_succ_cnt;
+	uint32_t agent_send_response_cnt;
+	uint32_t agent_response_succ_cnt;
+	uint32_t agent_status;
+	pid_t last_pid;
+	pid_t last_tid;
+};
+
+/* for secure agent */
+struct smc_event_data {
+	unsigned int agent_id;
+	unsigned int nsid;
+	unsigned int vmid;
+	atomic_t agent_ready;
+	wait_queue_head_t wait_event_wq;
+	int ret_flag; /* indicate whether agent is returned from TEE */
+	wait_queue_head_t send_response_wq;
+	struct list_head head;
+	struct tc_ns_smc_cmd cmd;
+	struct tc_ns_dev_file *owner;
+	void *agent_buff_kernel;
+	void *agent_buff_user; /* used for unmap */
+	unsigned int agent_buff_size;
+	atomic_t usage;
+	wait_queue_head_t ca_pending_wq;
+	/* indicate whether agent is allowed to return to TEE */
+	atomic_t ca_run;
+	struct agent_work_info work_info;
+};
+
+struct tee_agent_kernel_ops {
+	const char *agent_name;
+	unsigned int agent_id;
+	int (*tee_agent_init)(struct tee_agent_kernel_ops *agent_instance);
+	int (*tee_agent_run)(struct tee_agent_kernel_ops *agent_instance);
+	int (*tee_agent_work)(struct tee_agent_kernel_ops *agent_instance);
+	int (*tee_agent_stop)(struct tee_agent_kernel_ops *agent_instance);
+	int (*tee_agent_exit)(struct tee_agent_kernel_ops *agent_instance);
+	int (*tee_agent_crash_work)(
+		struct tee_agent_kernel_ops *agent_instance,
+		struct tc_ns_client_context *context,
+		unsigned int dev_file_id);
+	struct task_struct *agent_thread;
+	void *agent_data;
+	void *agent_buff;
+	unsigned int agent_buff_size;
+	struct list_head list;
+};
+
+struct ca_info {
+	char path[MAX_PATH_SIZE];
+	uint32_t uid;
+	uint32_t agent_id;
+};
+
+static inline void get_agent_event(struct smc_event_data *event_data)
+{
+	if (event_data)
+		atomic_inc(&event_data->usage);
+}
+
+static inline void put_agent_event(struct smc_event_data *event_data)
+{
+	if (event_data) {
+		if (atomic_dec_and_test(&event_data->usage))
+			kfree(event_data);
+	}
+}
+
+int is_allowed_agent_ca(const struct ca_info *ca,
+	bool check_agent_id);
+void agent_init(void);
+void free_agent(void);
+struct smc_event_data *find_event_control(unsigned int agent_id, unsigned int nsid, unsigned int vmid);
+void send_event_response(unsigned int agent_id, unsigned int nsid, unsigned int vmid);
+int agent_process_work(const struct tc_ns_smc_cmd *smc_cmd,
+						unsigned int agent_id, unsigned int nsid, unsigned int vmid);
+int is_agent_alive(unsigned int agent_id, unsigned int nsid, unsigned int vmid);
+int tc_ns_set_native_hash(unsigned long arg, unsigned int cmd_id);
+int tc_ns_late_init(const struct tc_ns_dev_file *dev_file, unsigned long arg);
+int tc_ns_register_agent(struct tc_ns_dev_file *dev_file, unsigned int agent_id,
+						unsigned int buffer_size, void **buffer, bool user_agent);
+int tc_ns_unregister_agent(unsigned int agent_id, unsigned int nsid, unsigned int vmid);
+void send_crashed_event_response_all(const struct tc_ns_dev_file *dev_file);
+int tc_ns_wait_event(unsigned int agent_id, unsigned int nsid, unsigned int vmid);
+int tc_ns_send_event_response(unsigned int agent_id, unsigned int nsid, unsigned int vmid);
+void send_crashed_event_response_single(const struct tc_ns_dev_file *dev_file);
+int sync_system_time_from_user(const struct tc_ns_dev_file *dev_file,
+								const struct tc_ns_client_time *user_time);
+void sync_system_time_from_kernel(void);
+int tee_agent_clear_work(struct tc_ns_client_context *context,
+						unsigned int dev_file_id);
+int tee_agent_kernel_register(struct tee_agent_kernel_ops *new_agent);
+bool is_system_agent(const struct tc_ns_dev_file *dev_file);
+void tee_agent_clear_dev_owner(const struct tc_ns_dev_file *dev_file);
+char *get_proc_dpath(char *path, int path_len);
+int check_ext_agent_access(uint32_t agent_id);
+void free_agent_list(void);
+void show_agent_event_status(void);
+#endif

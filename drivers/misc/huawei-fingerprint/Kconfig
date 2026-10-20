@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: GPL-2.0
+config HUAWEI_FINGERPRINT
+	tristate "Huawei Qingyun L410 / Kirin 990 Fingerprint Sensor Bridge Driver"
+	default y
+	depends on ARM64
+	help
+	  This driver provides support for the Fingerprint Cards (FPC) sensor
+	  on Huawei Qingyun L410 (KLVU-WDU0B) / Kirin 990, creating the
+	  /dev/fingerprint device node and sysfs attributes for power, reset,
+	  and interrupt notifications.
+
+	  If unsure, say Y.
