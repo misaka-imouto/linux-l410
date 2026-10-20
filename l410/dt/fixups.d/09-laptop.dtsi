@@ -56,7 +56,7 @@
 
 // Power-button fingerprint sensor (FPC 1020 / 1024 compatible)
 &{/fingerprint} {
-	reset-gpios = <&{/amba/gpio@fa8ac000} 7 1>;	// GPIO 199, active low
+	reset-gpios = <&{/amba/gpio@fa8b7000} 1 1>;	// GPIO 281, active low
 	irq-gpios = <&{/amba/gpio@fa8b1000} 2 0>;	// GPIO 234, active high
 };
 

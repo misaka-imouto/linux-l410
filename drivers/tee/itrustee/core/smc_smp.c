@@ -825,6 +825,7 @@ static noinline int smp_smc_send(struct smc_send_param param,
 {
 	struct smc_in_params in_param = { param.cmd, param.ops, param.ca, 0, 0 };
 	struct smc_out_params out_param = {0};
+	int retry_count = 0;
 #if (CONFIG_CPU_AFF_NR != 0) || (defined CONFIG_CPU_BINDING)
 	struct cpumask old_mask;
 #endif
@@ -837,7 +838,7 @@ retry:
 	tee_trace_add_event(SMC_SEND, 0);
 	send_smc_cmd(&in_param, &out_param, 0);
 	tee_trace_add_event(SMC_DONE, 0);
-	tlogd("[cpu %d] return val %lx exit_reason %lx ta %lx targ %lx\n",
+	tlogi("[cpu %d] SMC call ret=%lx exit=%lx ta=%lx targ=%lx\n",
 		raw_smp_processor_id(), out_param.ret, out_param.exit_reason,
 		out_param.ta, out_param.target);
 
@@ -857,10 +858,12 @@ retry:
 			secret->exit = SMC_EXIT_ABORT;
 			tloge("receive kill signal\n");
 		} else {
-#if (!defined(CONFIG_PREEMPT)) || defined(CONFIG_RTOS_PREEMPT_OFF)
-			/* yield cpu to avoid soft lockup */
 			cond_resched();
-#endif
+			retry_count++;
+			if (retry_count > 50) {
+				tloge("SMC_EXIT_PREEMPTED retry count %d exceeded!\n", retry_count);
+				break;
+			}
 			goto retry;
 		}
 	}
@@ -1753,23 +1756,12 @@ resleep:
 			atomic_set(&pe->run, 0);
 			return PD_DONE;
 		}
-		if (step->cur < (step->size - 1)) {
-			step->cur++;
-			/*
-			 * As there may no timer irq in TEE, we need a chance to
-			 * run timer's irq handler initiatively by SMC_OPS_SCHEDTO.
-			 */
-			if (timer_no_irq) {
-				*ops = SMC_OPS_SCHEDTO;
-				return PD_WAKEUP;
-			} else {
-				goto resleep;
-			}
-		}
 		if (is_ca_killed(cmd_index, skip_kill)) {
 			*ops = (u64)process_abort_cmd(cmd_index, pe);
 			return PD_WAKEUP;
 		}
+		*ops = SMC_OPS_SCHEDTO;
+		return PD_WAKEUP;
 	} else {
 		woke_up = true;
 		tlogd("%s woke up\n", __func__);
