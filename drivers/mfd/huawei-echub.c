@@ -199,6 +199,36 @@ int huawei_echub_write(struct huawei_echub *ec, u16 reg, u8 arg)
 }
 EXPORT_SYMBOL_GPL(huawei_echub_write);
 
+static struct huawei_echub *global_echub;
+
+int huawei_echub_hdmi_power(bool enable)
+{
+	int ret;
+
+	if (!global_echub)
+		return -ENODEV;
+
+	if (enable) {
+		/* Enable LDO2 (EC_HDMI_VDD_ON) */
+		ret = huawei_echub_write(global_echub, ECHUB_REG_COMMAND, 0x53);
+		if (ret)
+			return ret;
+		fsleep(5000);
+		/* Enable LDO4 (EC_1V1_EN) */
+		ret = huawei_echub_write(global_echub, ECHUB_REG_COMMAND, 0x57);
+		if (ret)
+			return ret;
+	} else {
+		/* Disable LDO4 (EC_1V1_EN) */
+		huawei_echub_write(global_echub, ECHUB_REG_COMMAND, 0x56);
+		fsleep(5000);
+		/* Disable LDO2 (EC_HDMI_VDD_ON) */
+		huawei_echub_write(global_echub, ECHUB_REG_COMMAND, 0x52);
+	}
+	return 0;
+}
+EXPORT_SYMBOL_GPL(huawei_echub_hdmi_power);
+
 /*
  * debugfs: "stats", and "read" for poking at EC registers:
  *   echo "0x0280 0x90 1" > read; cat read
@@ -328,6 +358,8 @@ static int echub_probe(struct i2c_client *client)
 				   ARRAY_SIZE(echub_cells), NULL, 0, NULL);
 	if (ret)
 		return dev_err_probe(dev, ret, "failed to add EC functions\n");
+
+	global_echub = ec;
 
 	return 0;
 }

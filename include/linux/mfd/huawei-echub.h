@@ -39,6 +39,7 @@ struct huawei_echub;
 
 int huawei_echub_read(struct huawei_echub *ec, u16 reg, u8 arg, u8 *data, size_t len);
 int huawei_echub_write(struct huawei_echub *ec, u16 reg, u8 arg);
+int huawei_echub_hdmi_power(bool enable);
 
 static inline int huawei_echub_read_u8(struct huawei_echub *ec, u16 reg, u8 arg)
 {
