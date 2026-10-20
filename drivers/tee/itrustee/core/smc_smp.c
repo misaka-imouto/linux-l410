@@ -860,9 +860,11 @@ retry:
 		} else {
 			cond_resched();
 			retry_count++;
-			if (retry_count > 50) {
+			if (retry_count > 2000) {
 				tloge("SMC_EXIT_PREEMPTED retry count %d exceeded!\n", retry_count);
 			} else {
+				if ((retry_count % 50) == 0)
+					usleep_range(500, 1000);
 				goto retry;
 			}
 		}
