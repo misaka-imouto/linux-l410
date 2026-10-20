@@ -20,6 +20,7 @@
 	bridge-1v8-gpios = <&{/amba/gpio@fe007000} 7 0>;	/* GPIO_047 */
 	bridge-enable-gpios = <&{/amba/gpio@fa8ad000} 6 0>;	/* GPIO_206 */
 	panel-vdd-gpios = <&{/amba/gpio@fe005000} 4 0>;	/* GPIO_028 */
+	hpd-gpios = <&{/amba/gpio@fa8b7000} 2 0>;	/* GPIO_282 (HDMI Hotplug) */
 	backlight = <&backlight>;
 };
 
