@@ -88,8 +88,8 @@ if [ "$mode" = probe ]; then
 	UUID=* | PARTUUID=* | LABEL=*) dev=$(findfs "$root" 2>/dev/null) ;;
 	/dev/*) [ -b "$root" ] && dev=$root ;;
 	esac
-	if [ -n "$dev" ] && mount -o ro "$dev" /newroot 2>/dev/null; then
-		kmsg "mounted root $dev to /newroot (ro) for modules"
+	if [ -n "$dev" ] && { mount -o rw "$dev" /newroot 2>/dev/null || mount -o ro "$dev" /newroot 2>/dev/null; }; then
+		kmsg "mounted root $dev to /newroot for modules"
 		if [ -d "/newroot/lib/modules/$(uname -r)" ]; then
 			mkdir -p /lib
 			ln -sf "/newroot/lib/modules" /lib/modules
@@ -111,6 +111,13 @@ if [ "$mode" = probe ]; then
 	done
 	sleep 2
 	dump
+	if touch /newroot/.probe_test 2>/dev/null; then
+		rm -f /newroot/.probe_test
+		dmesg -s 16777216 > /newroot/l410-probe.log 2>&1
+		sync
+		kmsg "saved dmesg to /newroot/l410-probe.log"
+		umount /newroot 2>/dev/null
+	fi
 	bye
 fi
 
