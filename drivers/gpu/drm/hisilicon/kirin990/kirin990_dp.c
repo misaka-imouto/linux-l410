@@ -485,7 +485,6 @@ int kirin_dp_init(struct kirin_dss *k)
 {
 	struct device *dev = k->drm.dev;
 	struct kirin_dp *dp;
-	u32 hw_id;
 	int ret;
 
 	dp = drmm_kzalloc(&k->drm, sizeof(*dp), GFP_KERNEL);
@@ -503,21 +502,6 @@ int kirin_dp_init(struct kirin_dss *k)
 	dp->pclk = devm_clk_get_optional(dev, "pclk_dpctrl");
 	dp->aclk = devm_clk_get_optional(dev, "aclk_dpctrl");
 	dp->clk_ldi1 = devm_clk_get_optional(dev, "clk_ldi1");
-
-	/* Verify hardware ID */
-	if (dp->clk_16m && dp->pclk && dp->aclk) {
-		clk_prepare_enable(dp->clk_16m);
-		clk_prepare_enable(dp->pclk);
-		clk_prepare_enable(dp->aclk);
-
-		hw_id = readl(dp->base + DW_DP_ID);
-		drm_info(&k->drm, "DWC DP TX version: %#x, ID: %#x\n",
-			 readl(dp->base + DW_DP_VERSION_NUMBER), hw_id);
-
-		clk_disable_unprepare(dp->aclk);
-		clk_disable_unprepare(dp->pclk);
-		clk_disable_unprepare(dp->clk_16m);
-	}
 
 	/* Hotplug detection GPIO (GPIO 282) */
 	dp->hpd_gpio = devm_gpiod_get_optional(dev, "hpd", GPIOD_IN);

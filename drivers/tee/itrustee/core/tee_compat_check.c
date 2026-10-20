@@ -48,6 +48,11 @@ int32_t check_teeos_compat_level(const uint32_t *buffer, uint32_t size)
 		retry_count++;
 	}
 
+	if (version->magic == 0) {
+		tlogi("legacy Kirin 990 teeos detected (magic 0), bypass compat level check\n");
+		return 0;
+	}
+
 	if (version->magic != VER_CHECK_MAGIC_NUM) {
 		tloge("check ver magic num %u failed\n", version->magic);
 		return -EPERM;

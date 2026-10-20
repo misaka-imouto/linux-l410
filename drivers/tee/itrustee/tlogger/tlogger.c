@@ -1430,5 +1430,4 @@ module_exit(free_tlogger_service);
 
 MODULE_AUTHOR("iTrustee");
 MODULE_DESCRIPTION("TrustCore Logger");
-MODULE_VERSION("3.00");
 #endif

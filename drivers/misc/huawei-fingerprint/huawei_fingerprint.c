@@ -372,36 +372,58 @@ static int fingerprint_probe(struct platform_device *pdev)
 		return ret;
 
 	fp->gpiod_reset = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_LOW);
-	if (!fp->gpiod_reset) {
+	if (IS_ERR(fp->gpiod_reset)) {
+		ret = PTR_ERR(fp->gpiod_reset);
+		if (ret == -EPROBE_DEFER)
+			return ret;
+		fp->gpiod_reset = NULL;
+	}
+	if (!fp->gpiod_reset && gpio_is_valid(fp->reset_gpio)) {
 		ret = devm_gpio_request_one(dev, fp->reset_gpio,
 					    GPIOF_OUT_INIT_LOW,
 					    "fingerprint,reset_gpio");
-		if (ret)
+		if (ret) {
+			if (ret == -EPROBE_DEFER)
+				return -EPROBE_DEFER;
 			dev_warn(dev, "failed to request reset gpio %d: %d\n",
 				 fp->reset_gpio, ret);
-		else
+		} else {
 			fp->gpiod_reset = gpio_to_desc(fp->reset_gpio);
+		}
 	}
 
 	fp->gpiod_irq = devm_gpiod_get_optional(dev, "irq", GPIOD_IN);
-	if (!fp->gpiod_irq) {
+	if (IS_ERR(fp->gpiod_irq)) {
+		ret = PTR_ERR(fp->gpiod_irq);
+		if (ret == -EPROBE_DEFER)
+			return ret;
+		fp->gpiod_irq = NULL;
+	}
+	if (!fp->gpiod_irq && gpio_is_valid(fp->irq_gpio)) {
 		ret = devm_gpio_request_one(dev, fp->irq_gpio,
 					    GPIOF_IN,
 					    "fingerprint,irq_gpio");
-		if (ret)
+		if (ret) {
+			if (ret == -EPROBE_DEFER)
+				return -EPROBE_DEFER;
 			dev_warn(dev, "failed to request irq gpio %d: %d\n",
 				 fp->irq_gpio, ret);
-		else
+		} else {
 			fp->gpiod_irq = gpio_to_desc(fp->irq_gpio);
+		}
 	}
 
 	if (fp->gpiod_irq)
 		fp->irq = gpiod_to_irq(fp->gpiod_irq);
-	else
+	else if (gpio_is_valid(fp->irq_gpio))
 		fp->irq = gpio_to_irq(fp->irq_gpio);
+	else
+		fp->irq = -ENODEV;
 
+	if (fp->irq == -EPROBE_DEFER)
+		return -EPROBE_DEFER;
 	if (fp->irq < 0) {
-		dev_err(dev, "failed to map irq for gpio %d\n", fp->irq_gpio);
+		dev_err(dev, "failed to map irq for gpio %d: %d\n", fp->irq_gpio, fp->irq);
 		return fp->irq;
 	}
 
