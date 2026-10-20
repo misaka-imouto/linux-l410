@@ -1699,13 +1699,15 @@ enum smc_status_t {
 	ST_RETRY,
 };
 
-static long wait_event_internal(struct pending_entry *pe, struct timeout_step_t *step)
+static long wait_event_internal(struct pending_entry *pe, struct timeout_step_t *step, uint32_t cmd_index)
 {
 	if (!current->mm) {
-		return wait_event_freezable_timeout(pe->wq, atomic_read(&pe->run),
+		return wait_event_freezable_timeout(pe->wq,
+				atomic_read(&pe->run) || is_cmd_working_done(cmd_index),
 				step->steps[step->cur]);
 	} else {
-		return wait_event_timeout(pe->wq, atomic_read(&pe->run),
+		return wait_event_timeout(pe->wq,
+				atomic_read(&pe->run) || is_cmd_working_done(cmd_index),
 				step->steps[step->cur]);
 	}
 }
@@ -1729,7 +1731,12 @@ static enum pending_t proc_ta_pending(struct pending_entry *pe,
 resleep:
 	cur_timeout = jiffies_to_msecs(step->steps[step->cur]);
 	tee_trace_add_event(SMC_SLEEP, 0);
-	if (wait_event_internal(pe, step) == 0) {
+	if (wait_event_internal(pe, step, cmd_index) == 0) {
+		if (is_cmd_working_done(cmd_index)) {
+			tlogi("cmd %u done on step timeout check\n", cmd_index);
+			atomic_set(&pe->run, 0);
+			return PD_DONE;
+		}
 		if (step->cur < (step->size - 1)) {
 			step->cur++;
 			/*

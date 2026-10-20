@@ -1499,16 +1499,16 @@ static int tc_teeos_init(struct device *class_dev)
 		goto reboot_thread_free;
 	}
 
-	ret = mailbox_mempool_init();
-	if (ret != 0) {
-		tloge("tz mailbox init failed\n");
-		goto release_resmem;
-	}
-
 	ret = tz_spi_init(class_dev, g_dev_node);
 	if (ret != 0) {
 		tloge("tz spi init failed\n");
-		goto release_mempool;
+		goto release_resmem;
+	}
+
+	ret = mailbox_mempool_init();
+	if (ret != 0) {
+		tloge("tz mailbox init failed\n");
+		goto release_spi;
 	}
 
 	ret = tc_ns_register_host_nsid_vmid();
@@ -1520,6 +1520,8 @@ static int tc_teeos_init(struct device *class_dev)
 	return 0;
 release_mempool:
 	free_mailbox_mempool();
+release_spi:
+	free_tz_spi(class_dev);
 release_resmem:
 	free_reserved_mempool();
 reboot_thread_free:
