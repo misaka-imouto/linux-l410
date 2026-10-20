@@ -114,7 +114,7 @@ install -m 755 "$TREE/l410/initramfs/init" "$IR/init"
 # l410_deadman=0: the kernel takes over the AP watchdog WDT0 the firmware leaves running and
 # stops it (also the default since the takeover fix; l410_deadman=<seconds> arms it as a
 # bring-up deadman instead).
-CMDLINE="root=UUID=@ROOT_UUID@ ro rootwait l410.mode=root ignore_loglevel printk.devkmsg=on panic=10 nokaslr efi=noruntime log_buf_len=16M clk_ignore_unused pd_ignore_unused regulator_ignore_unused console=tty0 tz_uefi_enable=1 l410_deadman=0"
+CMDLINE="root=UUID=@ROOT_UUID@ ro rootwait l410.mode=root ignore_loglevel printk.devkmsg=on panic=10 nokaslr efi=noruntime log_buf_len=16M clk_ignore_unused pd_ignore_unused regulator_ignore_unused console=tty0 l410_deadman=0"
 cat > "$B/boot.cfg" << EOF
 echo 'L410 kernel $KVER'
 linux /boot/l410/Image $CMDLINE

@@ -2041,18 +2041,15 @@ static int init_smc_related_rsrc(const struct device *class_dev)
 	koadpt_kthread_bind_mask(g_siq_thread, &new_mask);
 	/* some products specify the cpu that kthread need to bind */
 	tz_kthread_bind_mask(g_siq_thread);
-	g_ipi_helper_worker = kthread_create_worker(0, "g_ipi_helper_worker");
-	g_ipi_helper_thread = kthread_create(kthread_worker_fn,
-		g_ipi_helper_worker, "ipihelper");
-	if (IS_ERR_OR_NULL(g_ipi_helper_thread)) {
-		dev_err(class_dev, "couldn't create ipi helper threads %ld\n",
-			PTR_ERR(g_ipi_helper_thread));
-		ret = (int)PTR_ERR(g_ipi_helper_thread);
+	g_ipi_helper_worker = kthread_create_worker(0, "ipihelper");
+	if (IS_ERR(g_ipi_helper_worker)) {
+		dev_err(class_dev, "couldn't create ipi helper worker %ld\n",
+			PTR_ERR(g_ipi_helper_worker));
+		ret = (int)PTR_ERR(g_ipi_helper_worker);
 		return ret;
 	}
-
+	g_ipi_helper_thread = g_ipi_helper_worker->task;
 	tz_kthread_bind_mask(g_ipi_helper_thread);
-	wake_up_process(g_ipi_helper_thread);
 	wake_up_process(g_siq_thread);
 	init_cmd_monitor();
 	INIT_LIST_HEAD(&g_pending_head);
