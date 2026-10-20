@@ -42,6 +42,34 @@ dump() {
 	ls -l /sys/class/block/ > /tmp/blk 2>&1; dumpfile block /tmp/blk
 	ls /sys/class/net > /tmp/net 2>&1; dumpfile net /tmp/net
 	ls /sys/bus/usb/devices > /tmp/usb 2>&1; dumpfile usb /tmp/usb
+	kmsg "===== PUZZLE DIAGNOSTICS BEGIN ====="
+	kmsg ">>> [PUZZLE 0] Suspend-to-idle & Wakeup"
+	cat /sys/power/mem_sleep 2>/dev/null | while IFS= read -r line; do kmsg "P0 mem_sleep: $line"; done
+	for w in /sys/class/wakeup/*; do
+		[ -e "$w/name" ] && kmsg "P0 wakeup: $(cat $w/name 2>/dev/null)"
+	done
+
+	kmsg ">>> [PUZZLE 1] VCodec V500 Hardware Video Encoder (hisi-venc)"
+	ls -l /sys/class/video4linux 2>/dev/null | while IFS= read -r line; do kmsg "P1 v4l2: $line"; done
+	for v in /sys/class/video4linux/*; do
+		[ -e "$v/name" ] && kmsg "P1 device: $(basename $v) -> $(cat $v/name 2>/dev/null)"
+	done
+
+	kmsg ">>> [PUZZLE 2] External Display (DP/HDMI)"
+	ls -l /sys/class/drm 2>/dev/null | while IFS= read -r line; do kmsg "P2 drm: $line"; done
+	for c in /sys/class/drm/*; do
+		[ -e "$c/status" ] && kmsg "P2 connector: $(basename $c) status=$(cat $c/status 2>/dev/null) enabled=$(cat $c/enabled 2>/dev/null)"
+	done
+
+	kmsg ">>> [PUZZLE 3] Panfrost GPU (Mali-G76)"
+	ls -l /sys/class/drm/card* 2>/dev/null | while IFS= read -r line; do kmsg "P3 card: $line"; done
+	grep -i "panfrost" /proc/interrupts 2>/dev/null | while IFS= read -r line; do kmsg "P3 irq: $line"; done
+
+	kmsg ">>> [PUZZLE 4] iTrustee TEE & Fingerprint"
+	ls -l /dev/tc_ns_client /dev/fingerprint 2>/dev/null | while IFS= read -r line; do kmsg "P4 dev: $line"; done
+	ls -l /sys/class/misc/fingerprint* 2>/dev/null | while IFS= read -r line; do kmsg "P4 misc: $line"; done
+	kmsg "===== PUZZLE DIAGNOSTICS END ====="
+
 	[ -x /l410-extra.sh ] && /l410-extra.sh 2>&1 | while IFS= read -r line; do kmsg "extra: $line"; done
 	kmsg "===== end diagnostics"
 }
@@ -54,7 +82,27 @@ bye() {
 }
 
 if [ "$mode" = probe ]; then
-	sleep 5
+	sleep 2
+	dev=""
+	case $root in
+	UUID=* | PARTUUID=* | LABEL=*) dev=$(findfs "$root" 2>/dev/null) ;;
+	/dev/*) [ -b "$root" ] && dev=$root ;;
+	esac
+	if [ -n "$dev" ] && mount -o ro "$dev" /newroot 2>/dev/null; then
+		kmsg "mounted root $dev to /newroot (ro) for modules"
+		if [ -d "/newroot/lib/modules/$(uname -r)" ]; then
+			mkdir -p /lib
+			ln -sf "/newroot/lib/modules" /lib/modules
+			kmsg "linked /lib/modules to /newroot/lib/modules"
+			kmsg "loading hisi-venc..."
+			modprobe hisi-venc 2>&1 | while IFS= read -r line; do kmsg "modprobe hisi-venc: $line"; done
+			kmsg "loading tzdriver..."
+			modprobe tzdriver 2>&1 | while IFS= read -r line; do kmsg "modprobe tzdriver: $line"; done
+			kmsg "loading huawei_fingerprint..."
+			modprobe huawei_fingerprint 2>&1 | while IFS= read -r line; do kmsg "modprobe huawei_fingerprint: $line"; done
+		fi
+	fi
+	sleep 3
 	dump
 	bye
 fi
