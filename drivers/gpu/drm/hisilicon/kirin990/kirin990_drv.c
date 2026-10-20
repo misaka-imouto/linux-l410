@@ -99,7 +99,7 @@ static bool dump_state = true;
 module_param(dump_state, bool, 0444);
 MODULE_PARM_DESC(dump_state, "Dump the firmware DSS state at probe");
 
-static bool selftest = true;
+static bool selftest = false;
 module_param(selftest, bool, 0444);
 MODULE_PARM_DESC(selftest, "Scan out test patterns at probe and log the output CRCs");
 

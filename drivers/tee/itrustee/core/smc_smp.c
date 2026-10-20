@@ -1656,8 +1656,12 @@ static void init_timeout_step(uint32_t timeout, struct timeout_step_t *step)
 	uint32_t i = 0;
 
 	if (timeout == 0) {
-		step->steps[0] = RESLEEP_TIMEOUT * HZ;
-		step->size = 1;
+		step->steps[0] = msecs_to_jiffies(10);
+		step->steps[1] = msecs_to_jiffies(20);
+		step->steps[2] = msecs_to_jiffies(50);
+		step->steps[3] = msecs_to_jiffies(100);
+		step->steps[4] = RESLEEP_TIMEOUT * HZ;
+		step->size = 5;
 	} else {
 		uint32_t timeout_in_jiffies;
 
@@ -1724,11 +1728,23 @@ static enum pending_t proc_ta_pending(struct pending_entry *pe,
 	uint32_t timeout = (uint32_t)pending_args;
 	bool timer_no_irq = (pending_args >> 32) == 0 ? false : true;
 	uint32_t cur_timeout;
+
+	if (is_cmd_working_done(cmd_index)) {
+		tlogi("cmd %u already done at entry\n", cmd_index);
+		atomic_set(&pe->run, 0);
+		return PD_DONE;
+	}
+
 	if (step->cur == INVALID_STEP_SIZE)
 		init_timeout_step(timeout, step);
 	if (!current->mm)
 		kernel_call = true;
 resleep:
+	if (is_cmd_working_done(cmd_index)) {
+		tlogi("cmd %u done before wait\n", cmd_index);
+		atomic_set(&pe->run, 0);
+		return PD_DONE;
+	}
 	cur_timeout = jiffies_to_msecs(step->steps[step->cur]);
 	tee_trace_add_event(SMC_SLEEP, 0);
 	if (wait_event_internal(pe, step, cmd_index) == 0) {
