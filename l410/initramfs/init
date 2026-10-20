@@ -96,10 +96,10 @@ if [ "$mode" = probe ]; then
 			kmsg "linked /lib/modules to /newroot/lib/modules"
 			kmsg "loading hisi-venc..."
 			modprobe hisi-venc 2>&1 | while IFS= read -r line; do kmsg "modprobe hisi-venc: $line"; done
-			kmsg "loading tzdriver..."
-			modprobe tzdriver 2>&1 | while IFS= read -r line; do kmsg "modprobe tzdriver: $line"; done
 			kmsg "loading huawei_fingerprint..."
 			modprobe huawei_fingerprint 2>&1 | while IFS= read -r line; do kmsg "modprobe huawei_fingerprint: $line"; done
+			kmsg "loading tzdriver..."
+			modprobe tzdriver 2>&1 | while IFS= read -r line; do kmsg "modprobe tzdriver: $line"; done
 		fi
 	fi
 	sleep 3
