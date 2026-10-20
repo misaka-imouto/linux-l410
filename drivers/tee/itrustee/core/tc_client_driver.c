@@ -1499,29 +1499,29 @@ static int tc_teeos_init(struct device *class_dev)
 		goto reboot_thread_free;
 	}
 
-	ret = tz_spi_init(class_dev, g_dev_node);
-	if (ret != 0) {
-		tloge("tz spi init failed\n");
-		goto release_resmem;
-	}
-
 	ret = mailbox_mempool_init();
 	if (ret != 0) {
 		tloge("tz mailbox init failed\n");
-		goto release_spi;
+		goto release_resmem;
+	}
+
+	ret = tz_spi_init(class_dev, g_dev_node);
+	if (ret != 0) {
+		tloge("tz spi init failed\n");
+		goto release_mempool;
 	}
 
 	ret = tc_ns_register_host_nsid_vmid();
 	if (ret != 0) {
 		tloge("failed to register host nsid\n");
-		goto release_mempool;
+		goto release_spi;
 	}
 
 	return 0;
-release_mempool:
-	free_mailbox_mempool();
 release_spi:
 	free_tz_spi(class_dev);
+release_mempool:
+	free_mailbox_mempool();
 release_resmem:
 	free_reserved_mempool();
 reboot_thread_free:
