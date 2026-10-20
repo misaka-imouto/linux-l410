@@ -398,7 +398,6 @@ static const struct drm_connector_funcs kirin_dp_connector_funcs = {
 	.reset = drm_atomic_helper_connector_reset,
 	.detect = kirin_dp_connector_detect,
 	.fill_modes = drm_helper_probe_single_connector_modes,
-	.destroy = drm_connector_cleanup,
 	.atomic_duplicate_state = drm_atomic_helper_connector_duplicate_state,
 	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state,
 };
@@ -473,7 +472,6 @@ static void kirin_dp_encoder_disable(struct drm_encoder *encoder,
 }
 
 static const struct drm_encoder_funcs kirin_dp_encoder_funcs = {
-	.destroy = drm_encoder_cleanup,
 };
 
 static const struct drm_encoder_helper_funcs kirin_dp_encoder_helper_funcs = {
