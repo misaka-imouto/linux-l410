@@ -377,10 +377,11 @@ static int echub_ac_get_property(struct power_supply *psy,
 	struct echub_battery *bat = power_supply_get_drvdata(psy);
 
 	switch (psp) {
-	case POWER_SUPPLY_PROP_ONLINE:
+	case POWER_SUPPLY_PROP_ONLINE: {
 		guard(mutex)(&bat->lock);
 		val->intval = bat->ac_online;
 		return 0;
+	}
 	default:
 		return -EINVAL;
 	}
