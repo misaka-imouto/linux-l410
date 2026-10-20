@@ -25,6 +25,7 @@
 struct backlight_device;
 struct gpio_desc;
 struct i2c_client;
+struct kirin_dp;
 struct regulator;
 
 #define KIRIN_NUM_RCH		8
@@ -162,6 +163,9 @@ struct kirin_dss {
 	struct drm_dp_aux aux;		/* DDC over the bridge's AUX channel */
 	const struct drm_edid *edid;	/* the panel's, applied in get_modes() */
 	bool edid_tried;
+
+	/* ---- DP / HDMI external display (kirin990_dp.c) ---- */
+	struct kirin_dp *dp;
 };
 
 #define to_kirin(x) container_of(x, struct kirin_dss, drm)
@@ -232,5 +236,9 @@ void kirin_dss_power_off(struct kirin_dss *k, int level);
 void kirin_dss_hw_init(struct kirin_dss *k, const struct drm_display_mode *mode);
 void kirin_primary_program(struct kirin_dss *k, dma_addr_t addr, u32 pitch,
 			   const struct kirin_format *fmt);
+
+/* kirin990_dp.c */
+int kirin_dp_init(struct kirin_dss *k);
+void kirin_dp_remove(struct kirin_dss *k);
 
 #endif /* __KIRIN990_DRV_H__ */

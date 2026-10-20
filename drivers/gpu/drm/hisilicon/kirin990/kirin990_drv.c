@@ -1539,6 +1539,10 @@ static int kirin_modeset_init(struct kirin_dss *k)
 	if (ret)
 		return ret;
 
+	ret = kirin_dp_init(k);
+	if (ret)
+		drm_warn(drm, "kirin_dp_init failed: %d\n", ret);
+
 	ret = drm_vblank_init(drm, 1);
 	if (ret)
 		return ret;
@@ -1702,6 +1706,7 @@ static void kirin_dss_remove(struct platform_device *pdev)
 		cancel_delayed_work_sync(&k->report_work);
 	drm_dev_unplug(&k->drm);
 	drm_atomic_helper_shutdown(&k->drm);
+	kirin_dp_remove(k);
 	cancel_work_sync(&k->recover_work);
 	if (k->commit_worker)
 		kthread_destroy_worker(k->commit_worker);
@@ -1714,6 +1719,7 @@ static void kirin_dss_shutdown(struct platform_device *pdev)
 	if (selftest)
 		cancel_delayed_work_sync(&k->report_work);
 	drm_atomic_helper_shutdown(&k->drm);
+	kirin_dp_remove(k);
 }
 
 static int kirin_dss_suspend(struct device *dev)
