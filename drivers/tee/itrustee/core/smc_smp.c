@@ -868,7 +868,7 @@ retry:
 			tloge("receive kill signal\n");
 		} else {
 			retry_count++;
-			if (retry_count > 50) {
+			if (retry_count > 10000) {
 				if (cmd_index >= 0 && is_cmd_working_done((uint32_t)cmd_index)) {
 					tlogi("cmd %d completed by TEE on retry %d\n", cmd_index, retry_count);
 					secret->exit = SMC_EXIT_NORMAL;
@@ -878,7 +878,6 @@ retry:
 				}
 				goto out;
 			}
-			usleep_range(500, 1000);
 			cond_resched();
 			goto retry;
 		}
@@ -1935,8 +1934,11 @@ static int smc_svc_thread_fn(void *arg)
 		smc_cmd.cmd_id = GLOBAL_CMD_ID_SET_SERVE_CMD;
 		ret = smp_smc_send_func(&smc_cmd, false, false);
 		tlogd("smc svc return 0x%x\n", ret);
-		/* add schedule to avoid upgrading or rebooting soft lockup */
-		cond_resched();
+		/* avoid tight spin when TEE has no serve requests or returns error */
+		if (ret != 0)
+			msleep_interruptible(100);
+		else
+			cond_resched();
 	}
 	tloge("smc svc thread stop\n");
 	return 0;
