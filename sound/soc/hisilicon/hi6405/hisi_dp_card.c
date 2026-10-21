@@ -91,6 +91,8 @@ static int hisi_dp_card_probe(struct platform_device *pdev)
 	priv->dai_link.num_codecs = 1;
 	priv->dai_link.platforms = &snd_soc_dummy_dlc;
 	priv->dai_link.num_platforms = 1;
+	priv->dai_link.dai_fmt = SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_NB_NF |
+				 SND_SOC_DAIFMT_CBC_CFC;
 	priv->dai_link.init = hisi_dp_dai_init;
 
 	priv->card.dev = dev;
