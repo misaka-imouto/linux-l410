@@ -26,6 +26,7 @@
 #include <linux/workqueue.h>
 
 #include <drm/display/drm_dp_helper.h>
+#include <drm/display/drm_hdmi_audio_helper.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_connector.h>
 #include <drm/drm_edid.h>
@@ -35,6 +36,8 @@
 #include <drm/drm_print.h>
 #include <drm/drm_probe_helper.h>
 #include <drm/drm_simple_kms_helper.h>
+
+#include <sound/hdmi-codec.h>
 
 #include "kirin990_drv.h"
 
@@ -71,6 +74,24 @@
 #define DW_DP_VIDEO_CONFIG4		0x031c
 #define DW_DP_VIDEO_CONFIG5		0x0320
 
+#define DW_DP_AUDIO_CONFIG		0x0400
+#define   AUDIO_CONFIG_MUTE		BIT(15)
+#define   AUDIO_CONFIG_SPDIF		BIT(0)
+
+#define DW_DP_SDP_CONFIG		0x0500
+#define   SDP_TIMESTAMP_EN		BIT(0)
+#define   SDP_AUDIO_STREAM_EN		BIT(1)
+#define   SDP_INFOFRAME_EN		BIT(2)
+#define   SDP_VIDEO_STREAM_EN		BIT(3)
+
+#define DW_DP_SDP_CONFIG2		0x0504
+#define   SDP2_AUDIO_STREAM_EN		BIT(1)
+
+#define DW_DP_AUDIO_INFOFRAME_HEADER	0x0600
+#define DW_DP_AUDIO_INFOFRAME_DATA0	0x0604
+#define DW_DP_AUDIO_INFOFRAME_DATA1	0x0608
+#define DW_DP_AUDIO_INFOFRAME_DATA2	0x060c
+
 #define DW_DP_LINK_BW_SET		0x0500
 #define   BW_1620MBPS			0x06
 #define   BW_2700MBPS			0x0a
@@ -78,9 +99,6 @@
 
 #define DW_DP_LANE_COUNT_SET		0x0504
 #define   LANES_2			0x02
-
-#define DW_DP_TRAINING_LANE0_SET	0x0600
-#define DW_DP_TRAINING_LANE1_SET	0x0604
 
 #define DW_DP_PHY_CONFIG		0x0a00
 
@@ -335,6 +353,7 @@ static void kirin_dp_hpd_work(struct work_struct *work)
 		kirin_dp_power_off(dp);
 	}
 
+	drm_connector_hdmi_audio_plugged_notify(&dp->connector, dp->connected);
 	drm_helper_hpd_irq_event(&dp->dss->drm);
 }
 
@@ -400,6 +419,124 @@ static const struct drm_connector_funcs kirin_dp_connector_funcs = {
 	.fill_modes = drm_helper_probe_single_connector_modes,
 	.atomic_duplicate_state = drm_atomic_helper_connector_duplicate_state,
 	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state,
+};
+
+static int kirin_dp_audio_prepare(struct drm_connector *connector,
+				  struct hdmi_codec_daifmt *fmt,
+				  struct hdmi_codec_params *hparms)
+{
+	struct kirin_dp *dp = to_kirin_dp_connector(connector);
+	u32 conf = 0, ch_mask, sf = 0, if_data;
+
+	if (!dp->powered || !dp->enabled)
+		return -ENODEV;
+
+	/* Soft reset audio engine */
+	writel(RESET_AUDIO, dp->base + DW_DP_SOFT_RESET_CTRL);
+	udelay(10);
+	writel(0, dp->base + DW_DP_SOFT_RESET_CTRL);
+
+	if (fmt->fmt == HDMI_SPDIF)
+		conf |= AUDIO_CONFIG_SPDIF;
+
+	switch (hparms->channels) {
+	case 1 ... 2:
+		ch_mask = 0x1;
+		break;
+	case 3 ... 4:
+		ch_mask = 0x3;
+		break;
+	case 5 ... 6:
+		ch_mask = 0x7;
+		break;
+	case 7 ... 8:
+	default:
+		ch_mask = 0xf;
+		break;
+	}
+	conf |= (ch_mask << 1);
+	conf |= ((hparms->sample_width & 0x1f) << 5);
+	conf |= (((hparms->channels - 1) & 0x7) << 12);
+	conf |= (0x11 << 24); /* Core I2S + FIFO watermark */
+
+	/* Write audio config (unmuted: bit 15 is 0) */
+	writel(conf, dp->base + DW_DP_AUDIO_CONFIG);
+
+	switch (hparms->sample_rate) {
+	case 32000:  sf = 1; break;
+	case 44100:  sf = 2; break;
+	case 48000:  sf = 3; break;
+	case 88200:  sf = 4; break;
+	case 96000:  sf = 5; break;
+	case 176400: sf = 6; break;
+	case 192000: sf = 7; break;
+	default:     sf = 0; break;
+	}
+
+	if_data = ((hparms->channels - 1) & 0x7) |
+		  (sf << 10) |
+		  (hparms->cea.channel_allocation << 16);
+
+	writel(0x441b8400, dp->base + DW_DP_AUDIO_INFOFRAME_HEADER);
+	writel(if_data, dp->base + DW_DP_AUDIO_INFOFRAME_DATA0);
+	writel(0, dp->base + DW_DP_AUDIO_INFOFRAME_DATA1);
+	writel(0, dp->base + DW_DP_AUDIO_INFOFRAME_DATA2);
+
+	/* Enable Audio Timestamp SDP, Audio Stream SDP, Audio InfoFrame SDP */
+	writel(readl(dp->base + DW_DP_SDP_CONFIG) |
+	       SDP_TIMESTAMP_EN | SDP_AUDIO_STREAM_EN | SDP_INFOFRAME_EN,
+	       dp->base + DW_DP_SDP_CONFIG);
+	writel(readl(dp->base + DW_DP_SDP_CONFIG2) | SDP2_AUDIO_STREAM_EN,
+	       dp->base + DW_DP_SDP_CONFIG2);
+
+	drm_info(&dp->dss->drm, "DP audio configured: %d Hz, %d ch, %d bits (if_data=0x%08x)\n",
+		 hparms->sample_rate, hparms->channels, hparms->sample_width, if_data);
+	return 0;
+}
+
+static void kirin_dp_audio_shutdown(struct drm_connector *connector)
+{
+	struct kirin_dp *dp = to_kirin_dp_connector(connector);
+
+	if (!dp->base)
+		return;
+
+	writel(readl(dp->base + DW_DP_SDP_CONFIG) &
+	       ~(SDP_TIMESTAMP_EN | SDP_AUDIO_STREAM_EN | SDP_INFOFRAME_EN),
+	       dp->base + DW_DP_SDP_CONFIG);
+	writel(readl(dp->base + DW_DP_SDP_CONFIG2) & ~SDP2_AUDIO_STREAM_EN,
+	       dp->base + DW_DP_SDP_CONFIG2);
+	writel(readl(dp->base + DW_DP_AUDIO_CONFIG) | AUDIO_CONFIG_MUTE,
+	       dp->base + DW_DP_AUDIO_CONFIG);
+
+	writel(RESET_AUDIO, dp->base + DW_DP_SOFT_RESET_CTRL);
+	udelay(10);
+	writel(0, dp->base + DW_DP_SOFT_RESET_CTRL);
+	drm_info(&dp->dss->drm, "DP audio shutdown\n");
+}
+
+static int kirin_dp_audio_mute_stream(struct drm_connector *connector,
+				      bool enable, int direction)
+{
+	struct kirin_dp *dp = to_kirin_dp_connector(connector);
+	u32 val;
+
+	if (!dp->base)
+		return 0;
+
+	val = readl(dp->base + DW_DP_AUDIO_CONFIG);
+	if (enable)
+		val |= AUDIO_CONFIG_MUTE;
+	else
+		val &= ~AUDIO_CONFIG_MUTE;
+	writel(val, dp->base + DW_DP_AUDIO_CONFIG);
+	return 0;
+}
+
+static const struct drm_connector_hdmi_audio_funcs kirin_dp_audio_funcs = {
+	.prepare = kirin_dp_audio_prepare,
+	.shutdown = kirin_dp_audio_shutdown,
+	.mute_stream = kirin_dp_audio_mute_stream,
 };
 
 static const struct drm_connector_helper_funcs kirin_dp_connector_helper_funcs = {
@@ -540,6 +677,14 @@ int kirin_dp_init(struct kirin_dss *k)
 	if (ret)
 		goto err_aux;
 
+	/* Register HDMI/DP audio codec */
+	ret = drm_connector_hdmi_audio_init(&dp->connector, dev,
+					    &kirin_dp_audio_funcs, 8, 0, false, -1);
+	if (ret)
+		drm_warn(&k->drm, "failed to initialize HDMI audio codec: %d\n", ret);
+	else
+		drm_connector_hdmi_audio_plugged_notify(&dp->connector, dp->connected);
+
 	/* Setup HPD IRQ */
 	if (dp->hpd_gpio) {
 		dp->hpd_irq = gpiod_to_irq(dp->hpd_gpio);
@@ -572,6 +717,10 @@ void kirin_dp_remove(struct kirin_dss *k)
 		return;
 
 	cancel_delayed_work_sync(&dp->hpd_work);
+	if (dp->connector.hdmi_audio.codec_pdev) {
+		platform_device_unregister(dp->connector.hdmi_audio.codec_pdev);
+		dp->connector.hdmi_audio.codec_pdev = NULL;
+	}
 	drm_dp_aux_unregister(&dp->aux);
 	kirin_dp_power_off(dp);
 	if (dp->edid) {

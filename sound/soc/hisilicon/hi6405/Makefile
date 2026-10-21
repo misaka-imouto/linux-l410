@@ -4,7 +4,7 @@ ccflags-y += -I$(src) -I$(src)/include -I$(src)/codec -I$(src)/slimbus
 ccflags-y += -DCONFIG_SND_SOC_DA_COMBINE_V5=1
 
 snd-soc-hi6405-y := hi6405_main.o hi6405_ctrl.o hi64xx_irq.o asp_pcm.o hi6405_card.o \
-	hi64xx_resmgr.o hi64xx_mbhc.o hi64xx_utils.o
+	hisi_dp_card.o hi64xx_resmgr.o hi64xx_mbhc.o hi64xx_utils.o
 
 snd-soc-hi6405-y += slimbus/slimbus.o slimbus/slimbus_drv.o slimbus/csmi.o \
 	slimbus/cps_bm.o slimbus/slimbus_6405.o slimbus/slimbus_64xx.o \

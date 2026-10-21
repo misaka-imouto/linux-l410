@@ -17,6 +17,7 @@ extern struct platform_driver hi6405_codec_driver;
 extern struct platform_driver hisi_slimbus_driver;
 extern struct platform_driver asp_pcm_driver;
 extern struct platform_driver hi6405_card_driver;
+extern struct platform_driver hisi_dp_card_driver;
 
 /* SLIMbus manager is up and the codec framer can be enumerated */
 bool slimbus_is_ready(void);

@@ -16,6 +16,7 @@ static struct platform_driver * const hi6405_drivers[] = {
 	&hi6405_codec_driver,
 	&asp_pcm_driver,
 	&hi6405_card_driver,
+	&hisi_dp_card_driver,
 };
 
 static int __init hi6405_audio_init(void)

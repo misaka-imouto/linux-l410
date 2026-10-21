@@ -7,8 +7,10 @@ config DRM_KIRIN990
 	select DRM_CLIENT_SELECTION
 	select DRM_DISPLAY_DP_HELPER
 	select DRM_DISPLAY_HELPER
+	select DRM_DISPLAY_HDMI_AUDIO_HELPER
 	select DRM_KMS_HELPER
 	select DRM_GEM_DMA_HELPER
+	select SND_SOC_HDMI_CODEC if SND_SOC
 	help
 	  Display subsystem (DSS v510) of the HiSilicon Kirin 990 SoC, as used
 	  in the Huawei Qingyun L410 laptop, with its MIPI DSI host and the
