@@ -1,0 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0
+// Video encoder: hisi-venc manages its private SMMU internally via io-pgtable;
+// drop the firmware DT's generic IOMMU link to the unprobed hisi-smmu-lpae so
+// driver core does not defer the probe.
+&{/venc} {
+	/delete-property/ iommus;
+};

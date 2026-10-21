@@ -595,8 +595,10 @@ static int mailbox_register(const void *mb_pool, unsigned int size)
 		tloge("resigter mailbox failed, ret=%d\n", ret);
 		ret = -EIO;
 	} else {
-		if (operation->params[1].value.a <= g_mb_count || g_mb_count == 0)
+		if (operation->params[1].value.a <= (uint32_t)MAILBOX_POOL_COUNT && operation->params[1].value.a > 0)
 			g_mb_count = operation->params[1].value.a;
+		else
+			g_mb_count = (uint32_t)MAILBOX_POOL_COUNT;
 		tlogi("wish to register %u mailbox, success %u\n", (uint32_t)MAILBOX_POOL_COUNT, g_mb_count);
 	}
 

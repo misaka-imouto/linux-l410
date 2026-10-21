@@ -1513,8 +1513,8 @@ static int tc_teeos_init(struct device *class_dev)
 
 	ret = tc_ns_register_host_nsid_vmid();
 	if (ret != 0) {
-		tloge("failed to register host nsid\n");
-		goto release_spi;
+		tlogw("register host nsid not supported or failed (%d), continuing\n", ret);
+		ret = 0;
 	}
 
 	return 0;
