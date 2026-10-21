@@ -455,8 +455,8 @@ static int fingerprint_probe(struct platform_device *pdev)
 		goto err_cdev_del;
 	}
 
-	fp->cdev_device = device_create(fp->class, dev, fp->devno, NULL,
-					DRIVER_NAME);
+	fp->cdev_device = device_create_with_groups(fp->class, dev, fp->devno, fp,
+						    fingerprint_groups, DRIVER_NAME);
 	if (IS_ERR(fp->cdev_device)) {
 		ret = PTR_ERR(fp->cdev_device);
 		dev_err(dev, "failed to create device /dev/fingerprint: %d\n", ret);
