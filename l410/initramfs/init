@@ -100,6 +100,8 @@ if [ "$mode" = probe ]; then
 			timeout -s KILL 15 modprobe tzdriver 2>&1 | while IFS= read -r line; do kmsg "modprobe tzdriver: $line"; done
 			kmsg "loading huawei_fingerprint..."
 			timeout -s KILL 10 modprobe huawei_fingerprint 2>&1 | while IFS= read -r line; do kmsg "modprobe huawei_fingerprint: $line"; done
+			kmsg "loading hi110x..."
+			timeout -s KILL 10 modprobe hi110x 2>&1 | while IFS= read -r line; do kmsg "modprobe hi110x: $line"; done
 		fi
 	fi
 	# Wait for deferred probes to finish
@@ -110,6 +112,17 @@ if [ "$mode" = probe ]; then
 		i=$((i + 1))
 	done
 	sleep 2
+	if [ -x /newroot/remote-verify.sh ]; then
+		kmsg "running /newroot/remote-verify.sh in chroot..."
+		mkdir -p /newroot/proc /newroot/sys /newroot/dev /newroot/tmp
+		mount -t proc proc /newroot/proc 2>/dev/null
+		mount -t sysfs sysfs /newroot/sys 2>/dev/null
+		mount --bind /dev /newroot/dev 2>/dev/null
+		chroot /newroot /remote-verify.sh > /newroot/remote-verify.log 2>&1
+		kmsg "remote-verify.sh completed with rc=$?"
+		sync
+		umount /newroot/proc /newroot/sys /newroot/dev 2>/dev/null
+	fi
 	dump
 	if touch /newroot/.probe_test 2>/dev/null; then
 		rm -f /newroot/.probe_test
