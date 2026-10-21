@@ -386,8 +386,19 @@ static int tas2562_codec_probe(struct snd_soc_component *component)
 
 	tas2562->component = component;
 
-	if (tas2562->sdz_gpio)
+	if (tas2562->sdz_gpio) {
+		/*
+		 * Pulse SDZ instead of only driving it high: the vendor board code
+		 * resets the amplifiers this way on every boot (gpio 241: 0 for
+		 * 3 ms, then 1 for 2 ms).  Without the low pulse an amplifier that
+		 * was left in a bad state by a previous kernel stays off the I2C
+		 * bus (every transfer NAKs with -EREMOTEIO).
+		 */
+		gpiod_set_value_cansleep(tas2562->sdz_gpio, 0);
+		msleep(3);
 		gpiod_set_value_cansleep(tas2562->sdz_gpio, 1);
+		msleep(2);
+	}
 
 	return 0;
 }
