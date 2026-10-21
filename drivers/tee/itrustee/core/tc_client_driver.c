@@ -1518,8 +1518,6 @@ static int tc_teeos_init(struct device *class_dev)
 	}
 
 	return 0;
-release_spi:
-	free_tz_spi(class_dev);
 release_mempool:
 	free_mailbox_mempool();
 release_resmem:
