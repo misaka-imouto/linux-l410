@@ -498,7 +498,14 @@ static void kirin_dp_audio_shutdown(struct drm_connector *connector)
 {
 	struct kirin_dp *dp = to_kirin_dp_connector(connector);
 
-	if (!dp->base)
+	/*
+	 * ASoC calls shutdown() even when prepare() failed, which is what happens
+	 * whenever the HDMI audio codec is opened without an external display:
+	 * the DP TX block is powered down then and a register access raises an
+	 * asynchronous SError (machine check).  Only touch the block while it is
+	 * powered and the encoder is running.
+	 */
+	if (!dp->base || !dp->powered || !dp->enabled)
 		return;
 
 	writel(readl(dp->base + DW_DP_SDP_CONFIG) &
@@ -521,7 +528,7 @@ static int kirin_dp_audio_mute_stream(struct drm_connector *connector,
 	struct kirin_dp *dp = to_kirin_dp_connector(connector);
 	u32 val;
 
-	if (!dp->base)
+	if (!dp->base || !dp->powered || !dp->enabled)
 		return 0;
 
 	val = readl(dp->base + DW_DP_AUDIO_CONFIG);
