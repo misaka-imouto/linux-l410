@@ -93,7 +93,10 @@ if [ "$mode" = probe ]; then
 		if [ -d "/newroot/lib/modules/$(uname -r)" ]; then
 			mkdir -p /lib
 			ln -sf "/newroot/lib/modules" /lib/modules
-			kmsg "linked /lib/modules to /newroot/lib/modules"
+			[ -d "/newroot/vendor" ] && ln -sf "/newroot/vendor" /vendor
+			[ -d "/newroot/system" ] && ln -sf "/newroot/system" /system
+			[ -d "/newroot/lib/firmware" ] && ln -sf "/newroot/lib/firmware" /lib/firmware
+			kmsg "linked /lib/modules, /vendor, /system, /lib/firmware to /newroot"
 			kmsg "loading hisi-venc..."
 			modprobe hisi-venc 2>&1 | while IFS= read -r line; do kmsg "modprobe hisi-venc: $line"; done
 			kmsg "loading tzdriver..."

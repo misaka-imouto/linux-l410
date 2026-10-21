@@ -37,6 +37,11 @@ static const u32 hivenc_coded_fmts[] = {
 	V4L2_PIX_FMT_HEVC,
 };
 
+static inline struct hivenc_ctx *file_to_ctx(struct file *file)
+{
+	return container_of(file->private_data, struct hivenc_ctx, fh);
+}
+
 static struct hivenc_q_data *hivenc_get_q_data(struct hivenc_ctx *ctx,
 					       enum v4l2_buf_type type)
 {
@@ -526,7 +531,7 @@ static int hivenc_enum_fmt_vid_out(struct file *file, void *priv,
 
 static int hivenc_g_fmt(struct file *file, void *priv, struct v4l2_format *f)
 {
-	struct hivenc_ctx *ctx = priv;
+	struct hivenc_ctx *ctx = file_to_ctx(file);
 	struct hivenc_q_data *q_data = hivenc_get_q_data(ctx, f->type);
 	struct v4l2_pix_format_mplane *pix = &f->fmt.pix_mp;
 
@@ -571,7 +576,7 @@ static int hivenc_try_fmt(struct file *file, void *priv, struct v4l2_format *f)
 
 static int hivenc_s_fmt(struct file *file, void *priv, struct v4l2_format *f)
 {
-	struct hivenc_ctx *ctx = priv;
+	struct hivenc_ctx *ctx = file_to_ctx(file);
 	struct hivenc_q_data *q_data = hivenc_get_q_data(ctx, f->type);
 	struct vb2_queue *vq = v4l2_m2m_get_vq(ctx->fh.m2m_ctx, f->type);
 	int ret;
