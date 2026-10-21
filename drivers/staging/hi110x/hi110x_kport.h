@@ -13,8 +13,15 @@
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/completion.h>
+#include <linux/kconfig.h>
 
-#if __has_include(<linux/platform_drivers/pcie-kport-api.h>)
+/*
+ * CONFIG_PCIE_KPORT selects the RC driver and the pcie_kport_* API.  Do not use
+ * __has_include() here: the aarch64-linux-gnu-gcc used to build the L410 kernel
+ * answers no for headers that are only reachable through -I, which silently
+ * selected the stubs below and made the WiFi driver fail with -ENODEV.
+ */
+#if IS_ENABLED(CONFIG_PCIE_KPORT)
 #include <linux/platform_drivers/pcie-kport-api.h>
 #else
 #include <linux/pci.h>
