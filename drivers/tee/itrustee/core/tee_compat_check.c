@@ -27,6 +27,7 @@
 #define COMPAT_LEVEL_RETRY_SLEEP 10
 
 static bool g_ccos_flag = false;
+static bool g_is_kirin990_tee = false;
 
 int32_t check_teeos_compat_level(const uint32_t *buffer, uint32_t size)
 {
@@ -49,6 +50,7 @@ int32_t check_teeos_compat_level(const uint32_t *buffer, uint32_t size)
 	}
 
 	if (version->magic == 0) {
+		g_is_kirin990_tee = true;
 		tlogi("legacy Kirin 990 teeos detected (magic 0), bypass compat level check\n");
 		return 0;
 	}
@@ -80,4 +82,9 @@ int32_t check_teeos_compat_level(const uint32_t *buffer, uint32_t size)
 bool is_ccos(void)
 {
 	return g_ccos_flag;
+}
+
+bool is_kirin990_tee(void)
+{
+	return g_is_kirin990_tee;
 }

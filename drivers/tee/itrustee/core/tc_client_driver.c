@@ -1505,16 +1505,18 @@ static int tc_teeos_init(struct device *class_dev)
 		goto release_resmem;
 	}
 
-	ret = tz_spi_init(class_dev, g_dev_node);
-	if (ret != 0) {
-		tloge("tz spi init failed\n");
-		goto release_mempool;
-	}
+	if (!is_kirin990_tee()) {
+		ret = tz_spi_init(class_dev, g_dev_node);
+		if (ret != 0) {
+			tloge("tz spi init failed\n");
+			goto release_mempool;
+		}
 
-	ret = tc_ns_register_host_nsid_vmid();
-	if (ret != 0) {
-		tlogw("register host nsid not supported or failed (%d), continuing\n", ret);
-		ret = 0;
+		ret = tc_ns_register_host_nsid_vmid();
+		if (ret != 0) {
+			tlogw("register host nsid not supported or failed (%d), continuing\n", ret);
+			ret = 0;
+		}
 	}
 
 	return 0;
@@ -1544,9 +1546,11 @@ static void tc_re_init(const struct device *class_dev)
 		tloge("Failed to register ion mem in tee\n");
 
 #ifdef CONFIG_TZDRIVER_MODULE
-	ret = init_tlogger_service();
-	if (ret != 0)
-		tloge("tlogger init failed\n");
+	if (!is_kirin990_tee()) {
+		ret = init_tlogger_service();
+		if (ret != 0)
+			tloge("tlogger init failed\n");
+	}
 #endif
 	if (tzdebug_init() != 0)
 		tloge("tzdebug init failed\n");

@@ -46,4 +46,5 @@ struct os_version {
 
 int32_t check_teeos_compat_level(const uint32_t *buffer, uint32_t size);
 bool is_ccos(void);
+bool is_kirin990_tee(void);
 #endif
