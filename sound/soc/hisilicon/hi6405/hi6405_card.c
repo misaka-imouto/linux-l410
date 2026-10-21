@@ -179,8 +179,10 @@ static int hi6405_spk_init(struct snd_soc_pcm_runtime *rtd)
 
 		/* 32-bit I2S slots, PA 0 takes the left slot, PA 1 the right */
 		ret = snd_soc_dai_set_tdm_slot(dai, 0x3, 0x3, 2, 32);
-		if (ret)
-			return ret;
+		if (ret) {
+			dev_warn(rtd->card->dev, "TAS2562 amp %d set_tdm_slot failed (%d), skipping\n", i, ret);
+			continue;
+		}
 		snd_soc_component_update_bits(amp, TAS2562_TDM_CFG2,
 			TAS2562_RX_SCFG_MASK,
 			i ? TAS2562_RX_SCFG_RIGHT : TAS2562_RX_SCFG_LEFT);

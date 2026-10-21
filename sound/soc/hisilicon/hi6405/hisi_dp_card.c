@@ -39,7 +39,11 @@ static int hisi_dp_dai_init(struct snd_soc_pcm_runtime *rtd)
 	if (ret)
 		return ret;
 
-	return snd_soc_component_set_jack(component, &priv->hdmi_jack, NULL);
+	ret = snd_soc_component_set_jack(component, &priv->hdmi_jack, NULL);
+	if (ret)
+		dev_warn(card->dev, "failed to set HDMI jack: %d\n", ret);
+
+	return 0;
 }
 
 static const struct snd_soc_dapm_widget hisi_dp_widgets[] = {
@@ -50,17 +54,34 @@ static const struct snd_soc_dapm_route hisi_dp_routes[] = {
 	{ "HDMI Jack", NULL, "TX" },
 };
 
+static int match_hdmi_codec(struct device *dev, const void *data)
+{
+	return dev->driver && !strncmp(dev_name(dev), "hdmi-audio-codec", 16);
+}
+
 static int hisi_dp_card_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
+	struct device *codec_dev;
 	struct hisi_dp_card_priv *priv;
 	int ret;
 
-	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
-	if (!priv)
-		return -ENOMEM;
+	codec_dev = bus_find_device(&platform_bus_type, NULL, NULL, match_hdmi_codec);
+	if (!codec_dev)
+		return -EPROBE_DEFER;
 
+	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+	if (!priv) {
+		put_device(codec_dev);
+		return -ENOMEM;
+	}
+
+	priv->codec_comp.name = devm_kstrdup(dev, dev_name(codec_dev), GFP_KERNEL);
 	priv->codec_comp.dai_name = "i2s-hifi";
+	put_device(codec_dev);
+
+	if (!priv->codec_comp.name)
+		return -ENOMEM;
 
 	priv->dai_link.name = "HDMI";
 	priv->dai_link.stream_name = "HDMI Audio";

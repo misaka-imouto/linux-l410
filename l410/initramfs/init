@@ -55,10 +55,15 @@ dump() {
 		[ -e "$v/name" ] && kmsg "P1 device: $(basename $v) -> $(cat $v/name 2>/dev/null)"
 	done
 
-	kmsg ">>> [PUZZLE 2] External Display (DP/HDMI)"
+	kmsg ">>> [PUZZLE 2] External Display (DP/HDMI) & Audio"
 	ls -l /sys/class/drm 2>/dev/null | while IFS= read -r line; do kmsg "P2 drm: $line"; done
 	for c in /sys/class/drm/*; do
 		[ -e "$c/status" ] && kmsg "P2 connector: $(basename $c) status=$(cat $c/status 2>/dev/null) enabled=$(cat $c/enabled 2>/dev/null)"
+	done
+	cat /proc/asound/cards 2>/dev/null | while IFS= read -r line; do kmsg "P2 asound card: $line"; done
+	cat /proc/asound/pcm 2>/dev/null | while IFS= read -r line; do kmsg "P2 asound pcm: $line"; done
+	for s in /sys/class/sound/card*; do
+		[ -d "$s" ] && kmsg "P2 snd dev: $(basename $s)"
 	done
 
 	kmsg ">>> [PUZZLE 3] Panfrost GPU (Mali-G76)"
