@@ -632,19 +632,20 @@ static int config_spi_context(struct device *class_dev, struct device_node *np)
 {
 	int ret;
 
-#ifndef CONFIG_ACPI
-	if (!np) {
-		tloge("device node not found\n");
-		return -EINVAL;
+	/* Map IRQ from Device Tree if np exists, otherwise ACPI */
+	if (np) {
+		g_irq = irq_of_parse_and_map(np, 0);
+	}
+#ifdef CONFIG_ACPI
+	else {
+		g_irq = (unsigned int)get_acpi_tz_irq();
 	}
 #endif
+	if (g_irq == 0) {
+		tloge("device irq not found or 0\n");
+		return -EINVAL;
+	}
 
-	/* Map IRQ 0 from the OF interrupts list */
-#ifdef CONFIG_ACPI
-	g_irq = (unsigned int)get_acpi_tz_irq();
-#else
-	g_irq = irq_of_parse_and_map(np, 0);
-#endif
 	ret = devm_request_irq(class_dev, g_irq, tc_secure_notify,
 		IRQF_NO_SUSPEND, TC_NS_CLIENT_DEV, NULL);
 	if (ret < 0) {

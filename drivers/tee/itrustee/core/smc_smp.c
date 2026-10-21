@@ -874,7 +874,7 @@ retry:
 					secret->exit = SMC_EXIT_NORMAL;
 				} else {
 					tlogw("SMC_EXIT_PREEMPTED retry timeout (%d), breaking out\n", retry_count);
-					secret->exit = SMC_EXIT_NORMAL;
+					secret->exit = SMC_EXIT_PREEMPTED;
 				}
 				goto out;
 			}
@@ -1856,6 +1856,7 @@ int smp_smc_send_func(struct tc_ns_smc_cmd *in, bool reuse, bool skip_kill)
 	struct tc_ns_smc_cmd cmd = { {0}, 0 };
 	struct pending_entry *pe = NULL;
 	u64 ops;
+	int outer_retry = 0;
 	struct timeout_step_t timeout_step =
 		{{0, 0, 0, 0}, TO_STEP_SIZE, -1, false};
 
@@ -1867,6 +1868,12 @@ int smp_smc_send_func(struct tc_ns_smc_cmd *in, bool reuse, bool skip_kill)
 	ops = SMC_OPS_NORMAL;
 
 retry:
+	outer_retry++;
+	if (outer_retry > 20) {
+		tloge("cmd %d outer retry exceeded (%d), breaking out\n", info.cmd_index, outer_retry);
+		cmd.ret_val = -ETIMEDOUT;
+		goto clean;
+	}
 #ifdef CONFIG_TEE_REBOOT
 	if (is_tee_rebooting() && in->cmd_id == GLOBAL_CMD_ID_SET_SERVE_CMD) {
 		release_pending_entry(pe);
@@ -1890,10 +1897,15 @@ retry:
 				info.cmd_index, skip_kill) == ST_RETRY)
 				goto retry;
 		} else if (cmd_ret.exit == SMC_EXIT_ABORT) {
-			ops = (u64)process_abort_cmd(info.cmd_index, pe);
-			goto retry;
+			if (ops != SMC_OPS_ABORT_TASK && process_abort_cmd(info.cmd_index, pe) == SMC_OPS_ABORT_TASK) {
+				ops = SMC_OPS_ABORT_TASK;
+				goto retry;
+			}
+			tloge("abort cmd cannot be processed or task killed, exiting smc send\n");
+			cmd.ret_val = -EINTR;
+			goto clean;
 		} else {
-			tloge("invalid cmd work state\n");
+			tloge("invalid cmd work state (exit=%ld)\n", (long)cmd_ret.exit);
 			cmd.ret_val = TEEC_ERROR_GENERIC;
 			goto clean;
 		}
