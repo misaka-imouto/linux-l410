@@ -1999,6 +1999,12 @@ static int proc_tc_ns_smc(struct tc_ns_smc_cmd *cmd, bool reuse, bool skip_kill)
 	}
 	tlogd(KERN_INFO "***smc call start on cpu %d ***\n",
 		raw_smp_processor_id());
+	if (is_kirin990_tee()) {
+		if (cmd->cmd_type == CMD_TYPE_GLOBAL)
+			cmd->cmd_type = 1;
+		cmd->nsid = 0;
+		cmd->vmid = 0;
+	}
 
 	item = cmd_monitor_log(cmd);
 	ret = smp_smc_send_func(cmd, reuse, skip_kill);

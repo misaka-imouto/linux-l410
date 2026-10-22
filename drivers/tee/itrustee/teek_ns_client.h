@@ -193,7 +193,14 @@ enum smc_cmd_type {
 
 struct tc_ns_smc_cmd {
 	uint8_t      uuid[sizeof(struct tc_uuid)];
-	unsigned int cmd_type;
+	/*
+	 * The Kirin 990 TEEOS was built against the vendor 4.19 driver, whose
+	 * smc command entry has a one byte cmd_type, so cmd_id sits at offset 17
+	 * (verified by dumping the struct the 4.19 kernel hands to tc_ns_smc()).
+	 * Keeping this a u32 shifts every following field by three bytes on the
+	 * shared queue and TEEOS then never completes user initiated commands.
+	 */
+	uint8_t      cmd_type;
 	unsigned int cmd_id;
 	unsigned int dev_file_id;
 	unsigned int context_id;
