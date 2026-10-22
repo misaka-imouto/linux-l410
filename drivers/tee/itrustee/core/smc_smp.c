@@ -171,6 +171,9 @@ enum smc_ops_exit {
 compile_time_assert(sizeof(struct tc_ns_smc_queue) <= PAGE_SIZE,
 	size_of_tc_ns_smc_queue_too_large);
 #endif
+/* The vendor Kirin 990 TEEOS uses a 102 byte smc command entry. */
+compile_time_assert(sizeof(struct tc_ns_smc_cmd_wire) == 102,
+	size_of_tc_ns_smc_cmd_wire_invalid);
 
 static bool g_reserved_cmd_buffer = false;
 static u64 g_cmd_size = 0;
@@ -218,6 +221,70 @@ static inline void release_smc_buf_lock(smc_buf_lock_t *lock)
 	preempt_enable();
 }
 
+/*
+ * Translate between the driver's internal command struct and the 102 byte
+ * vendor 4.19 queue entry.  Everything up to ca_pid is byte for byte the
+ * same; after that the vendor carries the AUTH_ENHANCE token/params physical
+ * addresses and tgid, while our struct has nsid/vmid/res_int.  The old TEEOS
+ * knows nothing about nsid/vmid, so drop them and leave the token/params
+ * fields zero (the vendor driver does the same for global commands).
+ */
+static void smc_cmd_to_wire(const struct tc_ns_smc_cmd *in,
+	struct tc_ns_smc_cmd_wire *out)
+{
+	memset(out, 0, sizeof(*out));
+	memcpy(out->uuid, in->uuid, sizeof(out->uuid));
+	out->cmd_type = in->cmd_type;
+	out->cmd_id = in->cmd_id;
+	out->dev_file_id = in->dev_file_id;
+	out->context_id = in->context_id;
+	out->agent_id = in->agent_id;
+	out->operation_phys = in->operation_phys;
+	out->operation_h_phys = in->operation_h_phys;
+	out->login_method = in->login_method;
+	out->login_data_phy = in->login_data_phy;
+	out->login_data_h_addr = in->login_data_h_addr;
+	out->login_data_len = in->login_data_len;
+	out->err_origin = in->err_origin;
+	out->ret_val = in->ret_val;
+	out->event_nr = in->event_nr;
+	out->uid = in->uid;
+	out->ca_pid = in->ca_pid;
+	out->pid = in->pid;
+	out->eventindex = in->eventindex;
+	out->started = in->started;
+}
+
+static void smc_cmd_from_wire(const struct tc_ns_smc_cmd_wire *in,
+	struct tc_ns_smc_cmd *out)
+{
+	memcpy(out->uuid, in->uuid, sizeof(out->uuid));
+	out->cmd_type = in->cmd_type;
+	out->cmd_id = in->cmd_id;
+	out->dev_file_id = in->dev_file_id;
+	out->context_id = in->context_id;
+	out->agent_id = in->agent_id;
+	out->operation_phys = in->operation_phys;
+	out->operation_h_phys = in->operation_h_phys;
+	out->login_method = in->login_method;
+	out->login_data_phy = in->login_data_phy;
+	out->login_data_h_addr = in->login_data_h_addr;
+	out->login_data_len = in->login_data_len;
+	out->err_origin = in->err_origin;
+	out->ret_val = in->ret_val;
+	out->event_nr = in->event_nr;
+	out->uid = in->uid;
+	out->ca_pid = in->ca_pid;
+	out->pid = in->pid;
+	out->eventindex = in->eventindex;
+	out->started = in->started;
+	/* fields the vendor queue entry does not carry */
+	out->nsid = 0;
+	out->vmid = 0;
+	memset(out->res_int, 0, sizeof(out->res_int));
+	memset(out->res_chr, 0, sizeof(out->res_chr));
+}
+
 static void occupy_setbit_smc_in_doing_entry(int32_t i, int32_t *idx)
 {
 	g_cmd_data->in[i].event_nr = (unsigned int)i;
@@ -255,11 +322,7 @@ get_smc_retry:
 	for (i = 0; i < MAX_SMC_CMD; i++) {
 		if (test_bit(i, (unsigned long *)g_cmd_data->in_bitmap) != 0)
 			continue;
-		if (memcpy_s(&g_cmd_data->in[i], sizeof(g_cmd_data->in[i]),
-			cmd, sizeof(*cmd)) != EOK) {
-			tloge("memcpy failed,%s line:%d", __func__, __LINE__);
-			break;
-		}
+		smc_cmd_to_wire(cmd, &g_cmd_data->in[i]);
 		occupy_setbit_smc_in_doing_entry(i, &idx);
 		break;
 	}
@@ -319,12 +382,7 @@ static int copy_smc_out_entry(uint32_t idx, struct tc_ns_smc_cmd *copy,
 		show_cmd_bitmap();
 		return -ENOENT;
 	}
-	if (memcpy_s(copy, sizeof(*copy), &g_cmd_data->out[idx],
-		sizeof(g_cmd_data->out[idx])) != EOK) {
-		tloge("copy smc out failed\n");
-		release_smc_buf_lock(&g_cmd_data->smc_lock);
-		return -EFAULT;
-	}
+	smc_cmd_from_wire(&g_cmd_data->out[idx], copy);
 
 	isb();
 	wmb();
@@ -1639,6 +1697,10 @@ static int set_abort_cmd(int index)
 	g_cmd_data->in[index].operation_h_phys = 0;
 	g_cmd_data->in[index].login_data_phy = 0;
 	g_cmd_data->in[index].login_data_h_addr = 0;
+	g_cmd_data->in[index].token_phys = 0;
+	g_cmd_data->in[index].token_h_phys = 0;
+	g_cmd_data->in[index].params_phys = 0;
+	g_cmd_data->in[index].params_h_phys = 0;
 
 	clear_bit((unsigned int)index, (unsigned long *)g_cmd_data->doing_bitmap);
 	release_smc_buf_lock(&g_cmd_data->smc_lock);

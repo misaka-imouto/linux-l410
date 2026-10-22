@@ -88,6 +88,48 @@ struct pending_entry {
 
 typedef uint32_t smc_buf_lock_t;
 
+/*
+ * On-wire layout of one shared queue entry, as expected by the vendor
+ * Kirin 990 4.19 TEEOS.
+ *
+ * The 4.19 driver copies sizeof(struct tc_ns_smc_cmd) == 102 bytes into
+ * g_cmd_data->in[idx] and reads the same amount from g_cmd_data->out[idx]
+ * (verified by disassembling the vendor kernel: occupy/smp_smc_send
+ * memcpy 0x66 bytes, the queue layout is 3 bitmaps + smc_lock + last_in,
+ * in[18], last_out, out[18], so out[] sits at 0x750).  It is not the same
+ * struct as our newer one: with CONFIG_AUTH_ENHANCE the vendor tail is
+ * token_phys/token_h_phys/pid/params_phys/params_h_phys/eventindex/started
+ * and there is no nsid/vmid/res_int/res_chr.  If we use our 109 byte entry
+ * the in[]/out[] slots shift by 7 bytes each and TEEOS writes its result to
+ * an address the driver never reads.
+ */
+struct tc_ns_smc_cmd_wire {
+	uint8_t      uuid[sizeof(struct tc_uuid)];
+	uint8_t      cmd_type;
+	unsigned int cmd_id;
+	unsigned int dev_file_id;
+	unsigned int context_id;
+	unsigned int agent_id;
+	unsigned int operation_phys;
+	unsigned int operation_h_phys;
+	unsigned int login_method;
+	unsigned int login_data_phy;
+	unsigned int login_data_h_addr;
+	unsigned int login_data_len;
+	unsigned int err_origin;
+	int          ret_val;
+	unsigned int event_nr;
+	unsigned int uid;
+	unsigned int ca_pid; /* pid */
+	unsigned int token_phys;     /* CONFIG_AUTH_ENHANCE */
+	unsigned int token_h_phys;   /* CONFIG_AUTH_ENHANCE */
+	unsigned int pid;            /* tgid */
+	unsigned int params_phys;    /* CONFIG_AUTH_ENHANCE */
+	unsigned int params_h_phys;  /* CONFIG_AUTH_ENHANCE */
+	unsigned int eventindex;     /* tee audit event index for upload */
+	bool         started;
+} __attribute__((__packed__));
+
 struct tc_ns_smc_queue {
 	/* set when CA send cmd_in, clear after cmd_out return */
 	DECLARE_BITMAP(in_bitmap, MAX_SMC_CMD);
@@ -97,9 +139,9 @@ struct tc_ns_smc_queue {
 	DECLARE_BITMAP(out_bitmap, MAX_SMC_CMD);
 	smc_buf_lock_t smc_lock;
 	volatile uint32_t last_in;
-	struct tc_ns_smc_cmd in[MAX_SMC_CMD];
+	struct tc_ns_smc_cmd_wire in[MAX_SMC_CMD];
 	volatile uint32_t last_out;
-	struct tc_ns_smc_cmd out[MAX_SMC_CMD];
+	struct tc_ns_smc_cmd_wire out[MAX_SMC_CMD];
 };
 
 #define SYM_NAME_LEN_MAX 16
