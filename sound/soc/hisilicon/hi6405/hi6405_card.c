@@ -8,6 +8,7 @@
 
 #include <linux/debugfs.h>
 #include <linux/delay.h>
+#include <linux/i2c.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
@@ -28,6 +29,7 @@
 #define TAS2562_RX_SCFG_MASK	0x30
 #define TAS2562_RX_SCFG_LEFT	0x10
 #define TAS2562_RX_SCFG_RIGHT	0x20
+#define TAS2562_REV_ID		0x7d
 
 /* book 0 / page 2: idle channel detection threshold, 32 bit big endian */
 #define TAS2562_IDC_DTH		(2 * 128 + 0x64)
@@ -195,6 +197,45 @@ static int hi6405_spk_init(struct snd_soc_pcm_runtime *rtd)
 	return 0;
 }
 
+/*
+ * The firmware tree describes both amplifier populations: TAS2562 at 0x4c/0x4e
+ * (KLVU-WDU0B) and CS35L36 at 0x50/0x52 (KLVU-WDU0).  Only one pair is
+ * populated.  The TAS2562 driver now refuses to bind when the chip does not
+ * answer, so an unbound client means "not this board"; a chip that has not
+ * probed yet is probed directly over SMBus once more.
+ */
+static bool hi6405_amp_present(struct device_node *np)
+{
+	struct i2c_client *client;
+	bool present = false;
+	int ret, i;
+
+	if (!np)
+		return false;
+
+	client = of_find_i2c_device_by_node(np);
+	if (!client)
+		return false;
+
+	if (device_is_bound(&client->dev)) {
+		present = true;
+		goto out;
+	}
+
+	for (i = 0; i < 5; i++) {
+		ret = i2c_smbus_read_byte_data(client, TAS2562_REV_ID);
+		if (ret >= 0) {
+			present = true;
+			break;
+		}
+		msleep(20);
+	}
+
+out:
+	put_device(&client->dev);
+	return present;
+}
+
 static int hi6405_card_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -234,7 +275,9 @@ static int hi6405_card_probe(struct platform_device *pdev)
 
 	priv->spk_codecs[0].of_node = of_parse_phandle(np, "hisilicon,speaker-amps", 0);
 	priv->spk_codecs[1].of_node = of_parse_phandle(np, "hisilicon,speaker-amps", 1);
-	if (priv->spk_codecs[0].of_node && priv->spk_codecs[1].of_node) {
+	if (priv->spk_codecs[0].of_node && priv->spk_codecs[1].of_node &&
+	    hi6405_amp_present(priv->spk_codecs[0].of_node) &&
+	    hi6405_amp_present(priv->spk_codecs[1].of_node)) {
 		priv->spk_cpu.of_node = priv->pcm_codec.of_node;
 		priv->spk_cpu.dai_name = "DA_combine_v5-s4-dai";
 		priv->spk_codecs[0].dai_name = "tas2562-amplifier";
@@ -255,6 +298,8 @@ static int hi6405_card_probe(struct platform_device *pdev)
 		link->init = hi6405_spk_init;
 		link->ignore_pmdown_time = 1;
 		priv->card.num_links = 2;
+	} else if (priv->spk_codecs[0].of_node && priv->spk_codecs[1].of_node) {
+		dev_info(dev, "TAS2562 speaker amplifiers not populated, speaker disabled\n");
 	} else {
 		dev_warn(dev, "no speaker amplifiers described, speaker disabled\n");
 	}
