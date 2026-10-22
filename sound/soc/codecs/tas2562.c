@@ -380,25 +380,53 @@ static int tas2562_mute(struct snd_soc_dai *dai, int mute, int direction)
 	return tas2562_update_pwr_ctrl(tas2562);
 }
 
+/*
+ * The board drives the shared shutdown GPIO (L410 GPIO 241) with a low pulse
+ * and then expects the amplifier to answer on I2C.  The vendor board code
+ * pulses 0 for 3 ms, releases it and waits reset_debounce_wait_time (100 ms)
+ * before the first transfer; an amplifier that a previous kernel left shut
+ * down stays off the bus until it sees that low pulse.
+ */
+#define TAS2562_RESET_LOW_MS	3
+#define TAS2562_RESET_WAIT_MS	100
+
+static int tas2562_reset(struct tas2562_data *tas2562)
+{
+	unsigned int val;
+	int ret;
+
+	if (tas2562->sdz_gpio) {
+		gpiod_set_value_cansleep(tas2562->sdz_gpio, 0);
+		msleep(TAS2562_RESET_LOW_MS);
+		gpiod_set_value_cansleep(tas2562->sdz_gpio, 1);
+		msleep(TAS2562_RESET_WAIT_MS);
+	}
+
+	/* TAS2110 uses a different register map; keep its old probe behaviour. */
+	if (tas2562->model_id == TAS2110)
+		return 0;
+
+	/*
+	 * Do not register a component for a chip that is not there: on the L410
+	 * variant with CS35L36 amplifiers the TAS2562 nodes in the firmware tree
+	 * are unpopulated, and the card has to skip the speaker link instead of
+	 * failing every register access with -EREMOTEIO.
+	 */
+	ret = regmap_read(tas2562->regmap, TAS2562_REV_ID, &val);
+	if (ret) {
+		dev_err(tas2562->dev, "no response after reset: %d\n", ret);
+		return ret;
+	}
+
+	dev_info(tas2562->dev, "TAS2562 revision 0x%02x\n", val);
+	return 0;
+}
+
 static int tas2562_codec_probe(struct snd_soc_component *component)
 {
 	struct tas2562_data *tas2562 = snd_soc_component_get_drvdata(component);
 
 	tas2562->component = component;
-
-	if (tas2562->sdz_gpio) {
-		/*
-		 * Pulse SDZ instead of only driving it high: the vendor board code
-		 * resets the amplifiers this way on every boot (gpio 241: 0 for
-		 * 3 ms, then 1 for 2 ms).  Without the low pulse an amplifier that
-		 * was left in a bad state by a previous kernel stays off the I2C
-		 * bus (every transfer NAKs with -EREMOTEIO).
-		 */
-		gpiod_set_value_cansleep(tas2562->sdz_gpio, 0);
-		msleep(3);
-		gpiod_set_value_cansleep(tas2562->sdz_gpio, 1);
-		msleep(2);
-	}
 
 	return 0;
 }
@@ -769,6 +797,10 @@ static int tas2562_probe(struct i2c_client *client)
 	}
 
 	dev_set_drvdata(&client->dev, data);
+
+	ret = tas2562_reset(data);
+	if (ret)
+		return -ENODEV;
 
 	if (data->model_id == TAS2110)
 		return devm_snd_soc_register_component(dev,
