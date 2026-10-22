@@ -64,10 +64,80 @@
 	/delete-node/ regmap_cfg;
 };
 
+/*
+ * CS35L36 amplifiers on the KLVU-WDU0 variant.  The two chips share the same
+ * shutdown/reset line (GPIO 241) as the TAS2562s; the first driver to probe
+ * takes it and the second treats it as a shared reset.  The interrupt lines
+ * are GPIO 274 (left) and 275 (right), both active low.
+ */
+/ {
+	l410_amp_va: regulator-amp-va {
+		compatible = "regulator-fixed";
+		regulator-name = "VA";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		regulator-always-on;
+	};
+
+	l410_amp_vp: regulator-amp-vp {
+		compatible = "regulator-fixed";
+		regulator-name = "VP";
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		regulator-always-on;
+	};
+};
+
+&{/amba/i2c@FA04C000/smartpa@50} {
+	compatible = "cirrus,cs35l36";
+	#sound-dai-cells = <0>;
+	sound-name-prefix = "Left";
+	VA-supply = <&l410_amp_va>;
+	VP-supply = <&l410_amp_vp>;
+	reset-gpios = <&{/amba/gpio@fa8b2000} 1 1>;	/* GPIO 241, shared, active low */
+	interrupt-parent = <&{/amba/gpio@fa8b6000}>;
+	interrupts = <2 2>;			/* GPIO 274, falling edge */
+	cirrus,boost-ind-nanohenry = <1000>;
+	cirrus,boost-ctl-millivolt = <10000>;
+	cirrus,boost-peak-milliamp = <4500>;
+	cirrus,boost-ctl-select = <0x01>;
+	cirrus,multi-amp-mode;
+	cirrus,temp-warn-threshold = <0x01>;
+	cirrus,irq-drive-select = <0x01>;
+	cirrus,irq-gpio-select = <0x00>;
+	/delete-node/ hw_reset;
+	/delete-node/ irq_handler;
+	/delete-node/ regmap_cfg;
+};
+
+&{/amba/i2c@FA04C000/smartpa@52} {
+	compatible = "cirrus,cs35l36";
+	#sound-dai-cells = <0>;
+	sound-name-prefix = "Right";
+	VA-supply = <&l410_amp_va>;
+	VP-supply = <&l410_amp_vp>;
+	reset-gpios = <&{/amba/gpio@fa8b2000} 1 1>;	/* GPIO 241, shared, active low */
+	interrupt-parent = <&{/amba/gpio@fa8b6000}>;
+	interrupts = <3 2>;			/* GPIO 275, falling edge */
+	cirrus,boost-ind-nanohenry = <1000>;
+	cirrus,boost-ctl-millivolt = <10000>;
+	cirrus,boost-peak-milliamp = <4500>;
+	cirrus,boost-ctl-select = <0x01>;
+	cirrus,multi-amp-mode;
+	cirrus,temp-warn-threshold = <0x01>;
+	cirrus,irq-drive-select = <0x01>;
+	cirrus,irq-gpio-select = <0x00>;
+	/delete-node/ hw_reset;
+	/delete-node/ irq_handler;
+	/delete-node/ regmap_cfg;
+};
+
 &{/sound_hi6405} {
 	model = "HUAWEI L410";
 	hisilicon,asp-pcm = <&{/hi64xx_asp_dmac@fa54B000}>;
 	hisilicon,codec = <&{/codec_controller@e82b9000/hi64xx_irq@0/hi6405_codec@0}>;
 	hisilicon,speaker-amps = <&{/amba/i2c@FA04C000/smartpa@4C}>,
 				 <&{/amba/i2c@FA04C000/smartpa@4E}>;
+	hisilicon,speaker-amps-cs35l36 = <&{/amba/i2c@FA04C000/smartpa@50}>,
+					 <&{/amba/i2c@FA04C000/smartpa@52}>;
 };
