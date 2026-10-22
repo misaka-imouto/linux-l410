@@ -9,6 +9,7 @@ tzdriver-objs += core/shared_mem.o core/smc_abi.o
 tzdriver-objs += core/teek_client_api.o
 tzdriver-objs += core/tee_info.o
 tzdriver-objs += tzdriver_internal/tee_reboot/reboot.o core/tc_cvm_driver.o
+tzdriver-objs += tzdriver_internal/whitelist/agent_allowed_ca.o
 
 tzdriver-objs += libboundscheck/src/memcpy_s.o libboundscheck/src/memset_s.o libboundscheck/src/strcpy_s.o libboundscheck/src/strncpy_s.o \
                  libboundscheck/src/memmove_s.o libboundscheck/src/strcat_s.o libboundscheck/src/strncat_s.o libboundscheck/src/strtok_s.o \

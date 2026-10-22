@@ -1868,11 +1868,12 @@ int smp_smc_send_func(struct tc_ns_smc_cmd *in, bool reuse, bool skip_kill)
 
 retry:
 	outer_retry++;
-	if (outer_retry > 20) {
+	if (outer_retry > 10000) {
 		tloge("cmd %d outer retry exceeded (%d), breaking out\n", info.cmd_index, outer_retry);
 		cmd.ret_val = -ETIMEDOUT;
 		goto clean;
 	}
+	cond_resched();
 #ifdef CONFIG_TEE_REBOOT
 	if (is_tee_rebooting() && in->cmd_id == GLOBAL_CMD_ID_SET_SERVE_CMD) {
 		release_pending_entry(pe);

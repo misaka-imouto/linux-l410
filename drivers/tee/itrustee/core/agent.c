@@ -846,7 +846,11 @@ static unsigned long agent_buffer_map(unsigned long buffer, uint32_t size)
 		return user_addr;
 	}
 
-	down_read(&mm_sem_lock(current->mm));
+	/*
+	 * remap_pfn_range() takes the mmap lock for writing on 6.18 and
+	 * warns if only the read lock is held.
+	 */
+	mmap_write_lock(current->mm);
 	vma = find_vma(current->mm, user_addr);
 	if (!vma) {
 		tloge("user_addr is not valid in vma");
@@ -864,10 +868,10 @@ static unsigned long agent_buffer_map(unsigned long buffer, uint32_t size)
 		goto err_out;
 	}
 
-	up_read(&mm_sem_lock(current->mm));
+	mmap_write_unlock(current->mm);
 	return user_addr;
 err_out:
-	up_read(&mm_sem_lock(current->mm));
+	mmap_write_unlock(current->mm);
 	if (vm_munmap(user_addr, size))
 		tloge("munmap failed\n");
 	return -EFAULT;
