@@ -518,8 +518,13 @@ static int cs35l36_main_amp_event(struct snd_soc_dapm_widget *w,
 
 		regmap_read(cs35l36->regmap, CS35L36_INT4_RAW_STATUS, &reg);
 
-		if (WARN_ON_ONCE(reg & CS35L36_PLL_UNLOCK_MASK))
-			dev_crit(cs35l36->dev, "PLL Unlocked\n");
+		/*
+		 * The L410 clocks the amplifier from the codec's I2S4 LRCLK, so
+		 * the internal PLL can stay unlocked while audio runs.  Do not
+		 * warn about it every time the main amp powers up.
+		 */
+		if (reg & CS35L36_PLL_UNLOCK_MASK)
+			dev_dbg(cs35l36->dev, "PLL unlocked (external ASP clock)\n");
 
 		regmap_update_bits(cs35l36->regmap, CS35L36_ASP_RX1_SEL,
 				   CS35L36_PCM_RX_SEL_MASK,
@@ -1760,13 +1765,30 @@ static int cs35l36_i2c_probe(struct i2c_client *i2c_client)
 		}
 	}
 
-	if (cs35l36->reset_gpio)
+	if (cs35l36->reset_gpio) {
+		/*
+		 * Match the L410 vendor board code: drive the reset line high,
+		 * pulse it low, release it and wait reset_debounce_wait_time
+		 * (100 ms) before the first transfer.  Two milliseconds after
+		 * a plain release is not enough on this board; the chip still
+		 * NAKs its device ID.
+		 */
 		gpiod_set_value_cansleep(cs35l36->reset_gpio, 1);
+		msleep(1);
+		gpiod_set_value_cansleep(cs35l36->reset_gpio, 0);
+		msleep(1);
+		gpiod_set_value_cansleep(cs35l36->reset_gpio, 1);
+	}
 
-	usleep_range(2000, 2100);
+	usleep_range(100000, 101000);
 
 	/* initialize amplifier */
-	ret = regmap_read(cs35l36->regmap, CS35L36_SW_RESET, &reg_id);
+	for (i = 0; i < 5; i++) {
+		ret = regmap_read(cs35l36->regmap, CS35L36_SW_RESET, &reg_id);
+		if (ret >= 0)
+			break;
+		msleep(20);
+	}
 	if (ret < 0) {
 		dev_err(dev, "Get Device ID failed %d\n", ret);
 		goto err;
