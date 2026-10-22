@@ -1065,6 +1065,7 @@ static void context_419_to_native(const struct tc_ns_client_context_419 *src,
 	dst->started = src->started;
 	dst->file_size = src->file_size;
 	dst->file_buffer = src->file_buffer;
+	/* 0x90/0x98: AUTH_ENHANCE CA token pointer + length */
 }
 
 static void context_native_to_419(const struct tc_ns_client_context *src,
@@ -1116,7 +1117,13 @@ static long tc_client_419_session_ioctl(struct file *file, unsigned int cmd,
 			ret = -EINTR;
 		return ret;
 	case TC_NS_CLIENT_419_IOCTL_SEND_CMD_REQ:
+		/* 0x90/0x98 carry the AUTH_ENHANCE CA token for this invoke */
+		dev_file->teec_token = (uint64_t)context_419.reserved[0] |
+			((uint64_t)context_419.reserved[1] << 32);
+		dev_file->token_len = context_419.reserved[2];
 		ret = tc_ns_send_cmd(dev_file, &context);
+		dev_file->teec_token = 0;
+		dev_file->token_len = 0;
 		if (ret != 0)
 			tloge("4.19 send cmd failed ret is %d\n", ret);
 		break;
@@ -1224,14 +1231,22 @@ static long tc_client_ioctl(struct file *file, unsigned int cmd,
 		ret = tc_ns_load_secfile_419(file->private_data, argp, true);
 		break;
 	/*
-	 * GET_TEE_VERSION (0xc0047415, same number in both ABIs) is deliberately
-	 * not served here: on this Kirin 990 firmware the SMC for
-	 * GLOBAL_CMD_ID_GET_TEE_VERSION is never completed (the service thread
-	 * spins in SMC_EXIT_PREEMPTED until the 10001 retry limit), which wedges
-	 * teecd at startup.  The vendor teecd tolerates the -EINVAL it gets from
-	 * the agent fallback, so leave it alone.  The private node still serves
-	 * it for anyone who really wants it.
+	 * Serve GET_TEE_VERSION on the client node.  The 4.19 teecd only asks
+	 * for SET_NATIVECA_IDENTITY (which makes the kernel send
+	 * GLOBAL_CMD_ID_SET_CA_HASH) when this succeeds; returning -EINVAL made
+	 * it skip the CA identity registration and the open session then failed
+	 * with TEE_ERROR_GENERIC.  This used to hang before the queue entry
+	 * layout was fixed, so verify it still completes.
 	 */
+	case TC_NS_CLIENT_IOCTL_GET_TEE_VERSION:
+		ret = tc_ns_get_tee_version(file->private_data, argp);
+		break;
+	case TC_NS_CLIENT_IOCTL_SET_NATIVECA_IDENTITY:
+		mutex_lock(&g_set_ca_hash_lock);
+		ret = tc_ns_set_native_hash((unsigned long)(uintptr_t)argp,
+			GLOBAL_CMD_ID_SET_CA_HASH);
+		mutex_unlock(&g_set_ca_hash_lock);
+		break;
 	case TC_NS_CLIENT_IOCTL_CANCEL_CMD_REQ:
 		ret = tc_ns_send_cancel_cmd(file->private_data, argp);
 		break;
@@ -1240,17 +1255,6 @@ static long tc_client_ioctl(struct file *file, unsigned int cmd,
 		break;
 	case TC_NS_CLIENT_IOCTL_LOAD_APP_REQ:
 		ret = public_ioctl(file, cmd, arg, true);
-		break;
-	case TC_NS_CLIENT_IOCTL_SET_NATIVECA_IDENTITY:
-		/*
-		 * The 4.19 teecd performs this on the client node (it issues
-		 * GET_TEE_VERSION/SYC_SYS_TIME there too).  Route it like the
-		 * private node so GLOBAL_CMD_ID_SET_CA_HASH reaches TEEOS.
-		 */
-		mutex_lock(&g_set_ca_hash_lock);
-		ret = tc_ns_set_native_hash((unsigned long)(uintptr_t)argp,
-			GLOBAL_CMD_ID_SET_CA_HASH);
-		mutex_unlock(&g_set_ca_hash_lock);
 		break;
 	default:
 		ret = tc_client_agent_ioctl(file, cmd, arg);

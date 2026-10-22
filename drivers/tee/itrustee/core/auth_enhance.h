@@ -32,5 +32,7 @@ bool auth_enhance_is_open_param(uint8_t flags, uint32_t cmd_id,
 	unsigned int index);
 int auth_enhance_encrypt_open_param(const struct tc_ns_session *session,
 	uint8_t *buf, uint32_t buf_size);
+int auth_enhance_fill_invoke_token(const struct tc_call_params *call_params,
+	struct tc_op_params *op_params);
 
 #endif

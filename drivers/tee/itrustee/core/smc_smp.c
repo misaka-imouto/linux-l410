@@ -2070,8 +2070,16 @@ static int proc_tc_ns_smc(struct tc_ns_smc_cmd *cmd, bool reuse, bool skip_kill)
 	tlogd(KERN_INFO "***smc call start on cpu %d ***\n",
 		raw_smp_processor_id());
 	if (is_kirin990_tee()) {
+		/*
+		 * The vendor enum puts TA first: CMD_TYPE_TA == 0 and
+		 * CMD_TYPE_GLOBAL == 1, while ours is the opposite.  Global was
+		 * already remapped; the TA (invoke) path needs 1 -> 0 as well,
+		 * otherwise TEEOS answers TEEC_ERROR_INVALID_CMD.
+		 */
 		if (cmd->cmd_type == CMD_TYPE_GLOBAL)
 			cmd->cmd_type = 1;
+		else if (cmd->cmd_type == CMD_TYPE_TA)
+			cmd->cmd_type = 0;
 		cmd->nsid = 0;
 		cmd->vmid = 0;
 	}

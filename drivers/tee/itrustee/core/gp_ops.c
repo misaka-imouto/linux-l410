@@ -1015,6 +1015,29 @@ static int init_smc_cmd(const struct tc_call_params *call_params,
 			return ret;
 	}
 
+	/*
+	 * Vendor update_chksum(): TA commands carry their operation pointers and
+	 * pid XOR-ed with the session's SCRAMBLING_OPERATION word.  TEEOS
+	 * unscrambles with its own copy, so an unscrambled command is read at a
+	 * bogus physical address and fails.
+	 */
+	if (is_kirin990_tee() && !global) {
+		int tret = auth_enhance_fill_invoke_token(call_params, op_params);
+
+		if (tret != 0)
+			return tret;
+	}
+
+	if (is_kirin990_tee() && !global && call_params->sess) {
+		uint32_t scr = call_params->sess->secure_info.scrambling[1];
+
+		if (smc_cmd->operation_phys || smc_cmd->operation_h_phys) {
+			smc_cmd->operation_phys ^= scr;
+			smc_cmd->operation_h_phys ^= scr;
+		}
+		smc_cmd->pid ^= scr;
+	}
+
 	return 0;
 }
 
@@ -1208,6 +1231,25 @@ int tc_client_call(const struct tc_call_params *call_params)
 		goto free_src;
 
 	tee_ret = tc_ns_smc(op_params.smc_cmd);
+
+	/*
+	 * Keep the AUTH_ENHANCE session token: the open-session response issues
+	 * it, and every invoke updates it (timestamp bump) before sending.
+	 */
+	if (is_kirin990_tee() && call_params->sess && tee_ret == 0 &&
+		op_params.mb_pack) {
+		if ((call_params->flags & TC_CALL_GLOBAL) &&
+		    call_params->context->cmd_id == GLOBAL_CMD_ID_OPEN_SESSION) {
+			(void)memcpy_s(call_params->sess->teec_token,
+				sizeof(call_params->sess->teec_token),
+				op_params.mb_pack->token, TOKEN_BUFFER_LEN);
+			call_params->sess->teec_token_valid = true;
+		} else if (!(call_params->flags & TC_CALL_GLOBAL)) {
+			(void)memcpy_s(call_params->sess->teec_token,
+				sizeof(call_params->sess->teec_token),
+				op_params.mb_pack->token, TOKEN_BUFFER_LEN);
+		}
+	}
 
 	reset_session_id(call_params, &op_params, tee_ret);
 

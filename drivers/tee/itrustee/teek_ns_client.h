@@ -145,6 +145,9 @@ struct tc_ns_dev_file {
 	struct mm_struct *mm;
 	struct mutex groupid_lock;
 	struct list_head groupid_list;
+	/* 4.19 AUTH_ENHANCE CA token for the current invoke command */
+	uint64_t teec_token;
+	uint32_t token_len;
 };
 
 typedef struct {
@@ -323,6 +326,9 @@ struct tc_ns_session {
 #endif
 	uint8_t auth_hash_buf[MAX_SHA_256_SZ * NUM_OF_SO + MAX_SHA_256_SZ];
 	struct auth_session_secure_info secure_info;
+	/* 4.19 AUTH_ENHANCE session token (42 bytes, timestamp @32, api@40) */
+	uint8_t teec_token[TOKEN_BUFFER_LEN];
+	bool teec_token_valid;
 	atomic_t usage;
 };
 

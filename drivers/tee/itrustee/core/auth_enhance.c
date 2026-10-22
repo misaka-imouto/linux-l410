@@ -27,6 +27,7 @@
 #include <linux/slab.h>
 #include <linux/random.h>
 #include <linux/cred.h>
+#include <linux/uaccess.h>
 #include <linux/scatterlist.h>
 #include <linux/sizes.h>
 #include <crypto/skcipher.h>
@@ -42,6 +43,10 @@
 
 #define AUTH_SECURE_PLAIN_SIZE \
 	(AUTH_SECURE_PARAMS_SIZE - IV_BYTESIZE)
+#define AUTH_TS_INDEX   32
+#define AUTH_API_INDEX  40
+#define AUTH_SYNC_INDEX 41
+#define AUTH_UN_SYNCED  0x55
 
 static uint8_t g_root_key[AUTH_ROOT_KEY_LEN];
 static bool g_root_key_valid;
@@ -345,6 +350,76 @@ out:
 	kfree(plain);
 	kfree(enc);
 	return ret;
+}
+
+/*
+ * Invoke commands carry the libteec CA token (42 bytes at context+0x90).
+ * The vendor combines it with the session token and syncs the timestamp;
+ * start by passing it through unchanged.
+ */
+static void ae_bump_timestamp(uint8_t *token, const struct tc_ns_session *s)
+{
+	const uint8_t *key = (const uint8_t *)s->secure_info.scrambling;
+	uint64_t ts = 0;
+	int i;
+
+	for (i = 0; i < 8; i++)
+		((uint8_t *)&ts)[i] = token[AUTH_TS_INDEX + i] ^ key[i % 4];
+	ts++;
+	for (i = 0; i < 8; i++)
+		token[AUTH_TS_INDEX + i] = ((uint8_t *)&ts)[i] ^ key[i % 4];
+}
+
+/*
+ * Invoke commands carry the AUTH_ENHANCE token at token_phys.  The 42 byte
+ * session token is issued by TEEOS in the open-session response; each invoke
+ * merges the 16 byte libteec token into it, bumps the scrambled timestamp and
+ * marks it unsynced, exactly like the vendor append_teec_token()/
+ * update_timestamp().
+ */
+int auth_enhance_fill_invoke_token(const struct tc_call_params *call_params,
+	struct tc_op_params *op_params)
+{
+	struct tc_ns_smc_cmd *smc_cmd = NULL;
+	struct mb_cmd_pack *mb_pack = NULL;
+	const struct tc_ns_session *sess = NULL;
+	uint8_t lib[TOKEN_BUFFER_LEN];
+	uint64_t phys;
+
+	if (!call_params || !op_params || !op_params->smc_cmd ||
+		!op_params->mb_pack)
+		return -EINVAL;
+	if (!call_params->dev || !call_params->dev->teec_token)
+		return 0;
+
+	smc_cmd = op_params->smc_cmd;
+	mb_pack = op_params->mb_pack;
+	sess = call_params->sess;
+
+	(void)memset_s(lib, sizeof(lib), 0, sizeof(lib));
+	if (copy_from_user(lib,
+		(void __user *)(uintptr_t)call_params->dev->teec_token,
+		TOKEN_BUFFER_LEN) != 0)
+		return -EFAULT;
+
+	if (sess && sess->teec_token_valid) {
+		(void)memcpy_s(mb_pack->token, sizeof(mb_pack->token),
+			sess->teec_token, sizeof(sess->teec_token));
+		/* merge the libteec 16 byte token */
+		(void)memcpy_s(mb_pack->token, 16, lib, 16);
+		mb_pack->token[AUTH_API_INDEX] =
+			(uint8_t)call_params->dev->kernel_api;
+		ae_bump_timestamp(mb_pack->token, sess);
+		mb_pack->token[AUTH_SYNC_INDEX] = AUTH_UN_SYNCED;
+	} else {
+		(void)memcpy_s(mb_pack->token, sizeof(mb_pack->token),
+			lib, sizeof(lib));
+	}
+
+	phys = mailbox_virt_to_phys((uintptr_t)mb_pack->token);
+	smc_cmd->token_phys = (uint32_t)phys;
+	smc_cmd->token_h_phys = (uint32_t)(phys >> ADDR_TRANS_NUM);
+	return 0;
 }
 
 int auth_enhance_fill_open_session(const struct tc_call_params *call_params,
