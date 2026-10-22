@@ -1042,13 +1042,24 @@ int tc_ns_register_agent(struct tc_ns_dev_file *dev_file,
 	/* find_flag is false means it's a new agent register */
 	if (find_flag == AGENT_NO_EXIST || find_flag == AGENT_READY_TO_UNREG) {
 		/*
-		 * Obtain share memory which is released
-		 * in tc_ns_unregister_agent
+		 * The 4.19 vendor kernel does not send GLOBAL_CMD_ID_REGISTER_AGENT
+		 * for user agents from tc_ns_register_agent(); it only sets up the
+		 * shared buffer and lets the TA's own agent registration stand.
+		 * Sending that command here makes the Kirin 990 TEE never mark the
+		 * command done, so teecd hangs on its fs/misc agents.  Keep the
+		 * SMC registration for kernel agents only.
 		 */
-		ret = register_agent_to_tee(agent_id, nsid, vmid, event_data->agent_buff_kernel, size_align);
-		if (ret != 0) {
-			unmap_agent_buffer(event_data);
-			goto release_rsrc;
+		if (!user_agent) {
+			/*
+			 * Obtain share memory which is released
+			 * in tc_ns_unregister_agent
+			 */
+			ret = register_agent_to_tee(agent_id, nsid, vmid,
+				event_data->agent_buff_kernel, size_align);
+			if (ret != 0) {
+				unmap_agent_buffer(event_data);
+				goto release_rsrc;
+			}
 		}
 		if (find_flag == AGENT_NO_EXIST)
 			add_event_node_to_list(event_data);
