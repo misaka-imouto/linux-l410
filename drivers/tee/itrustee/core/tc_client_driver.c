@@ -1024,6 +1024,123 @@ static int tc_client_agent_ioctl(const struct file *file, unsigned int cmd,
 	return ret;
 }
 
+/*
+ * Vendor 4.19 (UOS) user space ABI compatibility
+ *
+ * The Kirin 990 UOS/L410 user space stack (teecd, libteec.so.1,
+ * libfingerprint.so, the fingerprint HAL and its daemon) was built against the
+ * vendor 4.19 tzdriver.  Its tc_ns_client_context is 0xb0 bytes, so the ioctl
+ * numbers that embed sizeof() differ from ours; the payload of the commands we
+ * translate here is otherwise layout compatible:
+ *
+ *   uuid, session_id, cmd_id, returns, login, params[4] (stride 0x18),
+ *   param_types and started live at the same offsets.  Only the tail moves:
+ *
+ *     4.19              6.x
+ *     0x90 reserved     calling_pid
+ *     0x98 reserved     -                (part of file_buffer on our side)
+ *     0xa0 file_size    0x94 file_size
+ *     0xa8 file_buffer  0x98 file_buffer
+ *
+ * 0x90..0xa0 is private to the 4.19 user space and never read by the 4.19
+ * kernel, so it is preserved verbatim instead of being mapped onto
+ * calling_pid.
+ */
+_Static_assert(sizeof(struct tc_ns_client_context_419) == 0xb0,
+	"4.19 tc_ns_client_context must stay 0xb0 bytes");
+_Static_assert(sizeof(struct load_secfile_ioctl_struct_419) == 0x20,
+	"4.19 load_secfile argument must stay 32 bytes");
+
+static void context_419_to_native(const struct tc_ns_client_context_419 *src,
+	struct tc_ns_client_context *dst)
+{
+	memset(dst, 0, sizeof(*dst));
+	memcpy(dst->uuid, src->uuid, sizeof(dst->uuid));
+	dst->session_id = src->session_id;
+	dst->cmd_id = src->cmd_id;
+	dst->returns = src->returns;
+	dst->login = src->login;
+	memcpy(dst->params, src->params, sizeof(dst->params));
+	dst->param_types = src->param_types;
+	dst->started = src->started;
+	dst->file_size = src->file_size;
+	dst->file_buffer = src->file_buffer;
+}
+
+static void context_native_to_419(const struct tc_ns_client_context *src,
+	struct tc_ns_client_context_419 *dst)
+{
+	/* dst->reserved[] belongs to the caller, leave it alone. */
+	memcpy(dst->uuid, src->uuid, sizeof(dst->uuid));
+	dst->session_id = src->session_id;
+	dst->cmd_id = src->cmd_id;
+	dst->returns = src->returns;
+	dst->login = src->login;
+	memcpy(dst->params, src->params, sizeof(dst->params));
+	dst->param_types = src->param_types;
+	dst->started = src->started;
+}
+
+static long tc_client_419_session_ioctl(struct file *file, unsigned int cmd,
+	unsigned long arg)
+{
+	struct tc_ns_dev_file *dev_file = NULL;
+	struct tc_ns_client_context_419 context_419;
+	struct tc_ns_client_context context;
+	void __user *argp = (void __user *)(uintptr_t)arg;
+	int ret;
+
+	if (!file || !file->private_data || !argp) {
+		tloge("invalid params\n");
+		return -EINVAL;
+	}
+	dev_file = file->private_data;
+
+	if (copy_from_user(&context_419, argp, sizeof(context_419)) != 0) {
+		tloge("copy from 4.19 user failed\n");
+		return -EFAULT;
+	}
+	context_419_to_native(&context_419, &context);
+	context.returns.origin = TEEC_ORIGIN_COMMS;
+
+	switch (cmd) {
+	case TC_NS_CLIENT_419_IOCTL_SES_OPEN_REQ:
+		ret = tc_ns_open_session(dev_file, &context);
+		if (ret != 0)
+			tloge("4.19 open session failed ret is %d\n", ret);
+		break;
+	case TC_NS_CLIENT_419_IOCTL_SES_CLOSE_REQ:
+		/* 4.19 does not copy the context back on close either. */
+		ret = tc_ns_close_session(dev_file, &context);
+		if (ret == -ERESTARTSYS)
+			ret = -EINTR;
+		return ret;
+	case TC_NS_CLIENT_419_IOCTL_SEND_CMD_REQ:
+		ret = tc_ns_send_cmd(dev_file, &context);
+		if (ret != 0)
+			tloge("4.19 send cmd failed ret is %d\n", ret);
+		break;
+	case TC_NS_CLIENT_419_IOCTL_CANCEL_CMD_REQ:
+		/* 4.19 has no cancel support and reports it via returns. */
+		context.returns.code = TEEC_ERROR_GENERIC;
+		context.returns.origin = TEEC_ORIGIN_COMMS;
+		ret = 0;
+		break;
+	default:
+		tloge("invalid 4.19 cmd 0x%x!\n", cmd);
+		return -EINVAL;
+	}
+
+	if (ret == -ERESTARTSYS)
+		return restart_syscall();
+
+	context_native_to_419(&context, &context_419);
+	if (copy_to_user(argp, &context_419, sizeof(context_419)) != 0 && ret == 0)
+		ret = -EFAULT;
+
+	return ret;
+}
+
 void handle_cmd_prepare(unsigned int cmd)
 {
 	if (cmd != TC_NS_CLIENT_IOCTL_WAIT_EVENT &&
@@ -1097,6 +1214,24 @@ static long tc_client_ioctl(struct file *file, unsigned int cmd,
 	case TC_NS_CLIENT_IOCTL_SEND_CMD_REQ:
 		ret = tc_client_session_ioctl(file, cmd, arg);
 		break;
+	case TC_NS_CLIENT_419_IOCTL_SES_OPEN_REQ:
+	case TC_NS_CLIENT_419_IOCTL_SES_CLOSE_REQ:
+	case TC_NS_CLIENT_419_IOCTL_SEND_CMD_REQ:
+	case TC_NS_CLIENT_419_IOCTL_CANCEL_CMD_REQ:
+		ret = (int)tc_client_419_session_ioctl(file, cmd, arg);
+		break;
+	case TC_NS_CLIENT_419_IOCTL_LOAD_APP_REQ:
+		ret = tc_ns_load_secfile_419(file->private_data, argp, true);
+		break;
+	/*
+	 * GET_TEE_VERSION (0xc0047415, same number in both ABIs) is deliberately
+	 * not served here: on this Kirin 990 firmware the SMC for
+	 * GLOBAL_CMD_ID_GET_TEE_VERSION is never completed (the service thread
+	 * spins in SMC_EXIT_PREEMPTED until the 10001 retry limit), which wedges
+	 * teecd at startup.  The vendor teecd tolerates the -EINVAL it gets from
+	 * the agent fallback, so leave it alone.  The private node still serves
+	 * it for anyone who really wants it.
+	 */
 	case TC_NS_CLIENT_IOCTL_CANCEL_CMD_REQ:
 		ret = tc_ns_send_cancel_cmd(file->private_data, argp);
 		break;
@@ -1117,15 +1252,17 @@ static long tc_client_ioctl(struct file *file, unsigned int cmd,
 	return (long)ret;
 }
 
-static int tc_client_open(struct inode *inode, struct file *file)
+static int tc_client_open_common(struct inode *inode, struct file *file,
+	bool require_teecd)
 {
 	int ret;
+	bool is_teecd;
 	struct tc_ns_dev_file *dev = NULL;
 	(void)inode;
 
-	ret = check_teecd_auth();
-	if (ret != 0) {
-		tloge("teec auth failed, ret %d\n", ret);
+	is_teecd = (check_teecd_auth() == 0);
+	if (require_teecd && !is_teecd) {
+		tloge("teec auth failed\n");
 		return -EACCES;
 	}
 
@@ -1134,9 +1271,28 @@ static int tc_client_open(struct inode *inode, struct file *file)
 	if (ret == 0)
 		file->private_data = dev;
 #ifdef CONFIG_TEE_REBOOT
-	get_teecd_pid();
+	/* the pid is used to kill teecd when TEE reboots, CAs must not win */
+	if (is_teecd)
+		get_teecd_pid();
 #endif
 	return ret;
+}
+
+/*
+ * The vendor 4.19 kernel let any process open the client node; a CA is
+ * authenticated later, when teecd performs the LOGIN ioctl on its behalf and
+ * hands the prepared fd over.  The openEuler code this driver is derived from
+ * only lets teecd in, which makes the vendor fingerprint HAL fail with -EACCES
+ * before its first ioctl.  Keep the strict check on the private node only.
+ */
+static int tc_client_open(struct inode *inode, struct file *file)
+{
+	return tc_client_open_common(inode, file, false);
+}
+
+static int tc_private_open(struct inode *inode, struct file *file)
+{
+	return tc_client_open_common(inode, file, true);
 }
 
 static int tc_client_close(struct inode *inode, struct file *file)
@@ -1226,7 +1382,7 @@ static const struct file_operations g_tc_ns_client_fops = {
 
 static const struct file_operations g_teecd_fops = {
 	.owner = THIS_MODULE,
-	.open = tc_client_open,
+	.open = tc_private_open,
 	.release = tc_private_close,
 	.unlocked_ioctl = tc_private_ioctl,
 #ifdef CONFIG_COMPAT

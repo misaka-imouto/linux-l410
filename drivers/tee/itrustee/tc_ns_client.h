@@ -92,6 +92,78 @@ struct tc_ns_client_context {
 	};
 };
 
+/*
+ * Vendor 4.19 (UOS / EMUI 4.19) userspace ABI
+ *
+ * The shipped Kirin 990 user space (teecd, libteec.so.1, libfingerprint.so and
+ * the fingerprint HAL) was built against the vendor 4.19 tzdriver.  Its
+ * tc_ns_client_context is 0xb0 bytes instead of the 0xa0 used here, so every
+ * _IOW()/_IOWR() command number that embeds sizeof(struct) differs:
+ *
+ *   4.19                                          6.x
+ *   0x40b07401 SES_OPEN_REQ                       0x40a07401
+ *   0xc0b07402 SES_CLOSE_REQ                      0xc0a07402
+ *   0xc0b07403 SEND_CMD_REQ                       0xc0a07403
+ *   0xc0b0740d CANCEL_CMD_REQ                     0xc0a0740d
+ *   0xc0207409 LOAD_APP_REQ (32 byte arg)         0xc0247409 (36 byte arg)
+ *
+ * The common prefix is byte for byte identical (uuid, session_id, cmd_id,
+ * returns, login, params[4], param_types, started), only the tail differs.
+ * Offsets below were verified against the vendor 4.19 kernel image and against
+ * a live kprobe of tc_ns_open_session() running the UOS fingerprint daemon.
+ */
+struct tc_ns_client_context_419 {
+	unsigned char uuid[UUID_LEN];                  /* 0x00 */
+	__u32 session_id;                              /* 0x10 */
+	__u32 cmd_id;                                  /* 0x14 */
+	struct tc_ns_client_return returns;            /* 0x18 */
+	struct tc_ns_client_login login;               /* 0x20 */
+	union tc_ns_client_param params[PARAM_NUM];    /* 0x28 .. 0x88 */
+	__u32 param_types;                             /* 0x88 */
+	__u8 started;                                  /* 0x8c */
+	__u8 pad0[3];
+	/*
+	 * 0x90: private to the 4.19 user space.  libteec puts a pointer here
+	 * and 0x98 next to it a u32 length (24); the 4.19 kernel never reads
+	 * either, it only copies the buffer back.  Keep them untouched.
+	 */
+	__u32 reserved[4];                             /* 0x90 .. 0xa0 */
+	unsigned int file_size;                        /* 0xa0 */
+	__u32 pad1;
+	union {                                        /* 0xa8 */
+		char *file_buffer;
+		struct {
+			__u32 file_addr;
+			__u32 file_h_addr;
+		} memref;
+	};
+};
+
+/* The vendor 4.19 secfile load argument is 32 bytes, not the 36 used here. */
+struct load_secfile_ioctl_struct_419 {
+	__u32 secfile_type;
+	unsigned char uuid[UUID_LEN];
+	__u32 file_size;
+	union {
+		char *file_buffer;
+		struct {
+			__u32 file_addr;
+			__u32 file_h_addr;
+		} memref;
+	};
+};
+
+#define TC_NS_CLIENT_419_IOCTL_SES_OPEN_REQ \
+	_IOW(TC_NS_CLIENT_IOC_MAGIC, 1, struct tc_ns_client_context_419)
+#define TC_NS_CLIENT_419_IOCTL_SES_CLOSE_REQ \
+	_IOWR(TC_NS_CLIENT_IOC_MAGIC, 2, struct tc_ns_client_context_419)
+#define TC_NS_CLIENT_419_IOCTL_SEND_CMD_REQ \
+	_IOWR(TC_NS_CLIENT_IOC_MAGIC, 3, struct tc_ns_client_context_419)
+#define TC_NS_CLIENT_419_IOCTL_CANCEL_CMD_REQ \
+	_IOWR(TC_NS_CLIENT_IOC_MAGIC, 13, struct tc_ns_client_context_419)
+#define TC_NS_CLIENT_419_IOCTL_LOAD_APP_REQ \
+	_IOWR(TC_NS_CLIENT_IOC_MAGIC, 9, struct load_secfile_ioctl_struct_419)
+
 struct tc_ns_client_time {
 	uint32_t seconds;
 	uint32_t millis;

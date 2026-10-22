@@ -395,13 +395,61 @@ static int init_ioctl_arg(struct tc_ns_dev_file *dev_file, const void __user *ar
 	return 0;
 }
 
+/*
+ * Shared implementation of the secfile load request.  @ioctl_arg already uses
+ * the native layout; @user_argp is only used to copy the updated sec_file_info
+ * back and may be NULL (the vendor 4.19 ABI has no error field to report).
+ */
+static int do_load_secfile(struct tc_ns_dev_file *dev_file,
+	struct load_secfile_ioctl_struct *ioctl_arg, bool is_from_client_node,
+	void __user *user_argp)
+{
+	int ret;
+	bool load = true;
+	void *file_addr = NULL;
+
+	if (ioctl_arg->sec_file_info.secfile_type >= LOAD_TYPE_MAX ||
+	    ioctl_arg->sec_file_info.secfile_type == LOAD_PATCH) {
+		tloge("invalid secfile type: %d!", ioctl_arg->sec_file_info.secfile_type);
+		return -EINVAL;
+	}
+
+	mutex_lock(&g_load_app_lock);
+	if (is_from_client_node) {
+		if (ioctl_arg->sec_file_info.secfile_type != LOAD_TA &&
+			ioctl_arg->sec_file_info.secfile_type != LOAD_LIB) {
+			tloge("this node does not allow this type of file to be loaded\n");
+			mutex_unlock(&g_load_app_lock);
+			return -EINVAL;
+		}
+	}
+
+	if (ioctl_arg->sec_file_info.secfile_type == LOAD_TA) {
+		ret = tc_ns_need_load_image(dev_file, ioctl_arg->uuid, (unsigned int)UUID_LEN, NULL);
+		if (ret != 1) /* 1 means we need to load image */
+			load = false;
+	}
+
+	if (load) {
+		file_addr = (void *)(uintptr_t)(ioctl_arg->memref.file_addr |
+			(((uint64_t)ioctl_arg->memref.file_h_addr) << ADDR_TRANS_NUM));
+		ret = tc_ns_load_image(dev_file, file_addr, &ioctl_arg->sec_file_info, NULL);
+		if (ret != 0)
+			tloge("load TA secfile: %d failed, ret = 0x%x\n",
+				ioctl_arg->sec_file_info.secfile_type, ret);
+	}
+	mutex_unlock(&g_load_app_lock);
+	if (user_argp != NULL &&
+		copy_to_user(user_argp, ioctl_arg, sizeof(*ioctl_arg)) != 0)
+		tloge("copy to user failed\n");
+	return ret;
+}
+
 int tc_ns_load_secfile(struct tc_ns_dev_file *dev_file,
 	void __user *argp, const struct load_secfile_ioctl_struct *k_argp, bool is_from_client_node)
 {
 	int ret;
 	struct load_secfile_ioctl_struct ioctl_arg = { {0}, {0}, {NULL} };
-	bool load = true;
-	void *file_addr = NULL;
 
 	ret = init_ioctl_arg(dev_file, argp, k_argp, &ioctl_arg);
 	if (ret != 0) {
@@ -409,42 +457,48 @@ int tc_ns_load_secfile(struct tc_ns_dev_file *dev_file,
 		return ret;
 	}
 
-	if (ioctl_arg.sec_file_info.secfile_type >= LOAD_TYPE_MAX ||
-	    ioctl_arg.sec_file_info.secfile_type == LOAD_PATCH) {
-		tloge("invalid secfile type: %d!", ioctl_arg.sec_file_info.secfile_type);
+	if (dev_file->kernel_api == TEE_REQ_FROM_KERNEL_MODE)
+		argp = NULL;
+
+	return do_load_secfile(dev_file, &ioctl_arg, is_from_client_node, argp);
+}
+
+/*
+ * Vendor 4.19 user space (teecd, libteec) passes a 32 byte load argument:
+ *	__u32 secfile_type; __u8 uuid[16]; __u32 file_size; char *file_buffer;
+ * while the native one is a 36 byte packed structure with sec_file_info.
+ */
+int tc_ns_load_secfile_419(struct tc_ns_dev_file *dev_file,
+	void __user *argp, bool is_from_client_node)
+{
+	struct load_secfile_ioctl_struct_419 arg_419;
+	struct load_secfile_ioctl_struct ioctl_arg = { {0}, {0}, {NULL} };
+	uint64_t file_addr;
+
+	if (!dev_file || !argp) {
+		tloge("invalid params\n");
 		return -EINVAL;
 	}
 
-	mutex_lock(&g_load_app_lock);
-	if (is_from_client_node) {
-		if (ioctl_arg.sec_file_info.secfile_type != LOAD_TA &&
-			ioctl_arg.sec_file_info.secfile_type != LOAD_LIB) {
-			tloge("this node does not allow this type of file to be loaded\n");
-			mutex_unlock(&g_load_app_lock);
-			return -EINVAL;
-		}
+	if (copy_from_user(&arg_419, argp, sizeof(arg_419)) != 0) {
+		tloge("copy 4.19 load arg from user failed\n");
+		return -EFAULT;
 	}
 
-	if (ioctl_arg.sec_file_info.secfile_type == LOAD_TA) {
-		ret = tc_ns_need_load_image(dev_file, ioctl_arg.uuid, (unsigned int)UUID_LEN, NULL);
-		if (ret != 1) /* 1 means we need to load image */
-			load = false;
+	ioctl_arg.sec_file_info.secfile_type =
+		(enum secfile_type_t)arg_419.secfile_type;
+	ioctl_arg.sec_file_info.file_size = arg_419.file_size;
+	if (memcpy_s(ioctl_arg.uuid, sizeof(ioctl_arg.uuid),
+		arg_419.uuid, sizeof(arg_419.uuid)) != EOK) {
+		tloge("copy 4.19 uuid failed\n");
+		return -EINVAL;
 	}
+	file_addr = (uint64_t)(uintptr_t)arg_419.file_buffer;
+	ioctl_arg.memref.file_addr = (__u32)file_addr;
+	ioctl_arg.memref.file_h_addr = (__u32)(file_addr >> ADDR_TRANS_NUM);
 
-	if (load) {
-		file_addr = (void *)(uintptr_t)(ioctl_arg.memref.file_addr |
-			(((uint64_t)ioctl_arg.memref.file_h_addr) << ADDR_TRANS_NUM));
-		ret = tc_ns_load_image(dev_file, file_addr, &ioctl_arg.sec_file_info, NULL);
-		if (ret != 0)
-			tloge("load TA secfile: %d failed, ret = 0x%x\n",
-				ioctl_arg.sec_file_info.secfile_type, ret);
-	}
-	mutex_unlock(&g_load_app_lock);
-	if (dev_file->kernel_api != TEE_REQ_FROM_KERNEL_MODE) {
-		if (copy_to_user(argp, &ioctl_arg, sizeof(ioctl_arg)) != 0)
-			tloge("copy to user failed\n");
-	}
-	return ret;
+	/* 4.19 does not report sec_load_err back, so no copy_to_user here. */
+	return do_load_secfile(dev_file, &ioctl_arg, is_from_client_node, NULL);
 }
 
 static uint32_t tc_ns_get_uid(void)
