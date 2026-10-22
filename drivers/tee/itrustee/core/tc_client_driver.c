@@ -1241,6 +1241,17 @@ static long tc_client_ioctl(struct file *file, unsigned int cmd,
 	case TC_NS_CLIENT_IOCTL_LOAD_APP_REQ:
 		ret = public_ioctl(file, cmd, arg, true);
 		break;
+	case TC_NS_CLIENT_IOCTL_SET_NATIVECA_IDENTITY:
+		/*
+		 * The 4.19 teecd performs this on the client node (it issues
+		 * GET_TEE_VERSION/SYC_SYS_TIME there too).  Route it like the
+		 * private node so GLOBAL_CMD_ID_SET_CA_HASH reaches TEEOS.
+		 */
+		mutex_lock(&g_set_ca_hash_lock);
+		ret = tc_ns_set_native_hash((unsigned long)(uintptr_t)argp,
+			GLOBAL_CMD_ID_SET_CA_HASH);
+		mutex_unlock(&g_set_ca_hash_lock);
+		break;
 	default:
 		ret = tc_client_agent_ioctl(file, cmd, arg);
 		break;
