@@ -576,6 +576,10 @@ static int mailbox_register(const void *mb_pool, unsigned int size)
 
 	operation->paramtypes = TEE_PARAM_TYPE_VALUE_INPUT |
 		(TEE_PARAM_TYPE_VALUE_INOUT << TEE_PARAM_NUM);
+	/* the 4.19 vendor TEEOS wants both parameters marked VALUE_INPUT */
+	if (is_kirin990_tee())
+		operation->paramtypes = TEE_PARAM_TYPE_VALUE_INPUT |
+			(TEE_PARAM_TYPE_VALUE_INPUT << TEE_PARAM_NUM);
 	operation->params[0].value.a = mailbox_virt_to_phys((uintptr_t)mb_pool);
 	operation->params[0].value.b =
 		(uint64_t)mailbox_virt_to_phys((uintptr_t)mb_pool) >> ADDR_TRANS_NUM;
@@ -640,13 +644,14 @@ int re_register_mailbox(void)
 	}
 	mutex_unlock(&g_mb_lock);
 
-	if (mailbox_register(buffer, sizeof(struct mailbox_buffer) * g_mb_count) != 0) {
-		if (!is_kirin990_tee()) {
-			tloge("register mailbox failed\n");
-			ret = -EIO;
-		} else {
+	if (is_kirin990_tee()) {
+		ret = mailbox_register((const void *)mailbox_page_address(g_m_zone[0]->all_pages),
+			MAILBOX_POOL_SIZE) != 0 ? -EIO : 0;
+		if (ret != 0)
 			tlogw("legacy TEEOS refused mailbox register, continuing without it\n");
-		}
+	} else if (mailbox_register(buffer, sizeof(struct mailbox_buffer) * g_mb_count) != 0) {
+		tloge("register mailbox failed\n");
+		ret = -EIO;
 	}
 
 	free_mailbox_buffer((uint64_t)(uintptr_t)buffer);
@@ -715,21 +720,28 @@ static int mailbox_init(uint32_t pool_count, mailbox_page_t **all_pages)
 		buffer[i].size = MAILBOX_POOL_SIZE;
 	}
 
-	if (mailbox_register(buffer, sizeof(struct mailbox_buffer) * pool_count) != 0) {
-		if (!is_kirin990_tee()) {
-			tloge("register mailbox failed\n");
-			ret = -EIO;
-			goto clear;
-		}
+	if (is_kirin990_tee()) {
 		/*
-		 * The 4.19 TEEOS wants the single contiguous pool protocol
-		 * instead of the mailbox_buffer array, so it refuses this and the
-		 * mailbox stays unregistered.  The TA image path does not use
-		 * the mailbox, so keep going with the pool count we allocated;
-		 * anything agent related will fail later and can be fixed then.
+		 * The Kirin 990 4.19 TEEOS registers one contiguous pool and
+		 * takes its physical address and total size, not the newer
+		 * mailbox_buffer array.
 		 */
-		tlogw("legacy TEEOS refused mailbox register, continuing without it\n");
-		g_mb_count = (uint32_t)MAILBOX_POOL_COUNT;
+		tloge("legacy mailbox register: vaddr=0x%lx size=%u\n",
+			(unsigned long)mailbox_page_address(all_pages[0]),
+			(unsigned int)MAILBOX_POOL_SIZE);
+		ret = mailbox_register((const void *)mailbox_page_address(all_pages[0]),
+			MAILBOX_POOL_SIZE);
+		tloge("legacy mailbox register ret=%d\n", ret);
+		if (ret != 0) {
+			tlogw("legacy TEEOS refused mailbox register, continuing without it\n");
+			g_mb_count = (uint32_t)MAILBOX_POOL_COUNT;
+		} else {
+			g_mb_count = 1;
+		}
+	} else if (mailbox_register(buffer, sizeof(struct mailbox_buffer) * pool_count) != 0) {
+		tloge("register mailbox failed\n");
+		ret = -EIO;
+		goto clear;
 	}
 
 	if (init_zone(all_pages) != 0) {

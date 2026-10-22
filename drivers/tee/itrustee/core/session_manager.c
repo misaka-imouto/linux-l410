@@ -848,8 +848,20 @@ static void pack_load_frame_cmd(uint32_t load_size,
 	mb_pack->operation.buffer_h_addr[2] =
 		(uint64_t)mailbox_virt_to_phys((uintptr_t)uuid_return) >> ADDR_TRANS_NUM;
 	mb_pack->operation.params[2].memref.size = sizeof(*uuid_return);
-	mb_pack->operation.paramtypes = teec_param_types(TEEC_MEMREF_TEMP_INPUT,
-		TEEC_VALUE_INOUT, TEEC_MEMREF_TEMP_OUTPUT, TEEC_VALUE_INOUT);
+	/*
+	 * The UOS 4.19 kernel builds 0x1627 here (disassembly of
+	 * load_image_by_frame at 0xffffff8008dfde94): MEMREF_TEMP_INOUT,
+	 * VALUE_OUTPUT, MEMREF_TEMP_OUTPUT, VALUE_INPUT.  It is not the
+	 * same as the later openEuler source (0x1635) nor ours (0x3605),
+	 * and TEEOS rejects the load with TEE_ERROR_BAD_PARAMETERS when the
+	 * direction bits differ.
+	 */
+	if (is_kirin990_tee())
+		mb_pack->operation.paramtypes = teec_param_types(TEEC_MEMREF_TEMP_INOUT,
+			TEEC_VALUE_OUTPUT, TEEC_MEMREF_TEMP_OUTPUT, TEEC_VALUE_INPUT);
+	else
+		mb_pack->operation.paramtypes = teec_param_types(TEEC_MEMREF_TEMP_INPUT,
+			TEEC_VALUE_INOUT, TEEC_MEMREF_TEMP_OUTPUT, TEEC_VALUE_INOUT);
 
 	smc_cmd->cmd_type = CMD_TYPE_GLOBAL;
 	smc_cmd->cmd_id = GLOBAL_CMD_ID_LOAD_SECURE_APP;
