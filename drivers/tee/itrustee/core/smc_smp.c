@@ -2006,7 +2006,6 @@ static int smc_svc_thread_fn(void *arg)
 		smc_cmd.cmd_id = GLOBAL_CMD_ID_SET_SERVE_CMD;
 		ret = smp_smc_send_func(&smc_cmd, false, false);
 		tlogd("smc svc return 0x%x\n", ret);
-		/* avoid tight spin when TEE has no serve requests or returns error */
 		if (ret != 0)
 			msleep_interruptible(100);
 		else

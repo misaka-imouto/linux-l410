@@ -56,34 +56,46 @@ struct sdesc_hash {
 
 const char g_libso[KIND_OF_SO][LIBTEEC_NAME_MAX_LEN] = {"libteec_vendor.so", "libteec.huawei.so"};
 
+static bool is_so_vma(struct vm_area_struct *vma, int so_index)
+{
+	if (!vma->vm_file || !vma->vm_file->f_path.dentry ||
+		!vma->vm_file->f_path.dentry->d_name.name)
+		return false;
+
+	return !strcmp(g_libso[so_index],
+		vma->vm_file->f_path.dentry->d_name.name) &&
+		(vma->vm_flags & VM_EXEC);
+}
+
 static int find_lib_code_area(struct mm_struct *mm,
 	struct vm_area_struct **lib_code_area, int so_index)
 {
 	struct vm_area_struct *vma = NULL;
-	bool is_valid_vma = false;
-	bool is_so_exists = false;
-	bool param_check = (!mm || !mm->mmap ||
-		!lib_code_area || so_index >= KIND_OF_SO);
+	bool param_check = (!mm || !lib_code_area || so_index >= KIND_OF_SO);
 
 	if (param_check) {
 		tloge("illegal input params\n");
 		return -EFAULT;
 	}
-	for (vma = mm->mmap; vma; vma = vma->vm_next) {
-		is_valid_vma = (vma->vm_file &&
-			vma->vm_file->f_path.dentry &&
-			vma->vm_file->f_path.dentry->d_name.name);
-		if (is_valid_vma) {
-			is_so_exists = !strcmp(g_libso[so_index],
-				vma->vm_file->f_path.dentry->d_name.name);
-			if (is_so_exists && (vma->vm_flags & VM_EXEC)) {
+#if (KERNEL_VERSION(6, 1, 0) <= LINUX_VERSION_CODE)
+	{
+		VMA_ITERATOR(vmi, mm, 0);
+
+		for_each_vma(vmi, vma) {
+			if (is_so_vma(vma, so_index)) {
 				*lib_code_area = vma;
-				tlogd("so name is %s\n",
-					vma->vm_file->f_path.dentry->d_name.name);
 				return EOK;
 			}
 		}
 	}
+#else
+	for (vma = mm->mmap; vma; vma = vma->vm_next) {
+		if (is_so_vma(vma, so_index)) {
+			*lib_code_area = vma;
+			return EOK;
+		}
+	}
+#endif
 	return -EFAULT;
 }
 
@@ -113,7 +125,9 @@ static int update_so_hash(struct mm_struct *mm,
 
 	while (code_info.code_start < code_info.code_end) {
 		// Get a handle of the page we want to read
-#if (KERNEL_VERSION(5, 10, 0) <= LINUX_VERSION_CODE)
+#if (KERNEL_VERSION(6, 5, 0) <= LINUX_VERSION_CODE)
+		rc = get_user_pages_remote(mm, code_info.code_start, 1, FOLL_FORCE, &ptr_page, NULL);
+#elif (KERNEL_VERSION(5, 10, 0) <= LINUX_VERSION_CODE)
 		rc = get_user_pages_remote(mm, code_info.code_start, 1, FOLL_FORCE, &ptr_page, NULL, NULL);
 #else
 		rc = get_user_pages_remote(cur_struct, mm, code_info.code_start,

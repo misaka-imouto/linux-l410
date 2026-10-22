@@ -28,11 +28,13 @@
 #include <linux/random.h>
 #include <linux/cred.h>
 #include <linux/scatterlist.h>
+#include <linux/sizes.h>
 #include <crypto/skcipher.h>
 #include <securec.h>
 
 #include "auth_enhance.h"
 #include "teek_ns_client.h"
+#include "teek_client_constants.h"
 #include "tc_ns_log.h"
 #include "smc_smp.h"
 #include "mailbox_mempool.h"
@@ -221,6 +223,127 @@ out:
 	kfree(enc);
 	kfree(plain);
 	mailbox_free(req);
+	return ret;
+}
+
+/*
+ * Encrypt the CA/SO hash into the vendor login_data format:
+ * [payload 64 | head 20 | cms padding 12] -> 96 byte plaintext, then the
+ * AES-CBC IV is appended, giving 112 bytes.  login_data_len stays 64.
+ */
+int auth_enhance_encrypt_login_info(const struct tc_ns_session *session,
+	uint8_t *out, uint32_t out_size)
+{
+	/* kernel stacks are vmap'd, so the skcipher buffers must be kmalloc */
+	uint32_t plain_len = AUTH_LOGIN_BUF_SIZE - IV_BYTESIZE;
+	uint8_t *plain = NULL;
+	uint8_t *enc = NULL;
+	struct auth_enhance_head *head = NULL;
+	uint32_t used;
+	uint32_t pad;
+	int ret;
+
+	if (!session || !out || out_size < AUTH_LOGIN_BUF_SIZE)
+		return -EINVAL;
+
+	plain = kzalloc(plain_len, GFP_KERNEL);
+	enc = kmalloc(AUTH_LOGIN_BUF_SIZE, GFP_KERNEL);
+	if (!plain || !enc) {
+		kfree(plain);
+		kfree(enc);
+		return -ENOMEM;
+	}
+	(void)memcpy_s(plain, plain_len, session->auth_hash_buf,
+		AUTH_LOGIN_PAYLOAD_SIZE);
+	head = (struct auth_enhance_head *)(plain + AUTH_LOGIN_PAYLOAD_SIZE);
+	(void)memcpy_s(head->magic, sizeof(head->magic), AUTH_MAGIC_STRING,
+		sizeof(AUTH_MAGIC_STRING));
+	head->payload_len = AUTH_LOGIN_PAYLOAD_SIZE;
+	used = AUTH_LOGIN_PAYLOAD_SIZE + sizeof(*head);
+	pad = plain_len - used;
+	(void)memset_s(plain + used, pad, (int)pad, pad);
+
+	ret = session_aes_crypt(plain, plain_len, enc, AUTH_LOGIN_BUF_SIZE,
+		session->secure_info.crypto_info.key, true);
+	if (ret) {
+		tloge("encrypt login info failed %d\n", ret);
+		goto out;
+	}
+	(void)memcpy_s(out, out_size, enc, AUTH_LOGIN_BUF_SIZE);
+out:
+	kfree(plain);
+	kfree(enc);
+	return ret;
+}
+
+/*
+ * Vendor do_opensess_auth_enhance(): the open session operation carries
+ * params[2]/[3] (native CA uid / CA path / pkg name) encrypted with the
+ * session key, exactly like the login hash.
+ */
+bool auth_enhance_is_open_param(uint8_t flags, uint32_t cmd_id,
+	unsigned int index)
+{
+	return ((flags & TC_CALL_GLOBAL) != 0) && (index >= 2) &&
+		(cmd_id == GLOBAL_CMD_ID_OPEN_SESSION);
+}
+
+int auth_enhance_encrypt_open_param(const struct tc_ns_session *session,
+	uint8_t *buf, uint32_t buf_size)
+{
+	uint32_t payload_size;
+	uint32_t pt_size;
+	uint32_t pta;
+	uint32_t total;
+	uint32_t alloc_size;
+	uint8_t *plain = NULL;
+	uint8_t *enc = NULL;
+	struct auth_enhance_head *head = NULL;
+	uint32_t pad;
+	int ret;
+
+	if (!session || !buf || !buf_size)
+		return -EINVAL;
+
+	payload_size = buf_size + 1;
+	pt_size = payload_size + sizeof(struct auth_enhance_head);
+	pta = (pt_size + CIPHER_BLOCK_BYTESIZE - 1) &
+		~(CIPHER_BLOCK_BYTESIZE - 1);
+	total = pta + IV_BYTESIZE;
+	alloc_size = (buf_size + SZ_4K - 1) & ~(SZ_4K - 1);
+	if (alloc_size < SZ_4K)
+		alloc_size = SZ_4K;
+	if (total > alloc_size) {
+		tloge("open param too large %u > %u\n", total, alloc_size);
+		return -EINVAL;
+	}
+
+	plain = kzalloc(pta, GFP_KERNEL);
+	enc = kmalloc(total, GFP_KERNEL);
+	if (!plain || !enc) {
+		ret = -ENOMEM;
+		goto out;
+	}
+	(void)memcpy_s(plain, pta, buf, buf_size);
+	head = (struct auth_enhance_head *)(plain + payload_size);
+	(void)memcpy_s(head->magic, sizeof(head->magic), AUTH_MAGIC_STRING,
+		sizeof(AUTH_MAGIC_STRING));
+	head->payload_len = payload_size;
+	pad = pta - pt_size;
+	if (pad)
+		(void)memset_s(plain + pt_size, pad, (int)pad, pad);
+
+	ret = session_aes_crypt(plain, pta, enc, total,
+		session->secure_info.crypto_info.key, true);
+	if (ret) {
+		tloge("encrypt open param failed %d\n", ret);
+		goto out;
+	}
+	(void)memcpy_s(buf, alloc_size, enc, total);
+	ret = 0;
+out:
+	kfree(plain);
+	kfree(enc);
 	return ret;
 }
 

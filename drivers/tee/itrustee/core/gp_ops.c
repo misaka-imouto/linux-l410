@@ -318,6 +318,17 @@ static int alloc_for_tmp_mem(const struct tc_call_params *call_params,
 		param_type, kernel_params) != 0)
 		return -EFAULT;
 
+	/* vendor do_opensess_auth_enhance(): encrypt CA uid/path params 2/3 */
+	if (is_kirin990_tee() && call_params->sess &&
+		auth_enhance_is_open_param(call_params->flags,
+			call_params->context->cmd_id, index)) {
+		if (auth_enhance_encrypt_open_param(call_params->sess,
+			temp_buf, buffer_size) != 0) {
+			mailbox_free(temp_buf);
+			return -EFAULT;
+		}
+	}
+
 	op_params->mb_pack->operation.params[index].memref.buffer =
 		mailbox_virt_to_phys((uintptr_t)temp_buf);
 	op_params->mb_pack->operation.buffer_h_addr[index] =
@@ -1002,10 +1013,6 @@ static int init_smc_cmd(const struct tc_call_params *call_params,
 
 		if (ret != 0)
 			return ret;
-		tlogi("open sess phys: op=0x%x login=0x%x/0x%x tok=0x%x params=0x%x\n",
-			smc_cmd->operation_phys, smc_cmd->login_data_phy,
-			smc_cmd->login_data_len, smc_cmd->token_phys,
-			smc_cmd->params_phys);
 	}
 
 	return 0;
@@ -1030,7 +1037,14 @@ static int check_login_for_encrypt(const struct tc_call_params *call_params,
 	struct mb_cmd_pack *mb_pack = op_params->mb_pack;
 
 	if (need_check_login(call_params, op_params) && sess) {
-		if (memcpy_s(mb_pack->login_data, sizeof(mb_pack->login_data),
+		if (is_kirin990_tee()) {
+			/* vendor format: AES-CBC(head || hash || padding) + IV */
+			int enc_ret = auth_enhance_encrypt_login_info(sess,
+				mb_pack->login_data, sizeof(mb_pack->login_data));
+
+			if (enc_ret != 0)
+				return enc_ret;
+		} else if (memcpy_s(mb_pack->login_data, sizeof(mb_pack->login_data),
 			sess->auth_hash_buf,
 			sizeof(sess->auth_hash_buf)) != 0) {
 			tloge("copy login data failed\n");

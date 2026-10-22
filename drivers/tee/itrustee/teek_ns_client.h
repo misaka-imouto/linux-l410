@@ -305,6 +305,12 @@ struct auth_session_secure_params {
 
 /* sizeof(head)=20, payload.tee2ree=60 -> 80; +16 byte trailing IV = 96 */
 #define AUTH_SECURE_PARAMS_SIZE 96
+/*
+ * Encrypted CA/SO hash blob: payload 64 (SO hash + CA hash), head 20,
+ * CMS padding to 96, then the 16 byte IV.
+ */
+#define AUTH_LOGIN_PAYLOAD_SIZE (MAX_SHA_256_SZ * (NUM_OF_SO + 1))
+#define AUTH_LOGIN_BUF_SIZE 112
 
 struct tc_ns_session {
 	unsigned int session_id;
@@ -322,7 +328,7 @@ struct tc_ns_session {
 
 struct mb_cmd_pack {
 	struct tc_ns_operation operation;
-	unsigned char login_data[MAX_SHA_256_SZ * NUM_OF_SO + MAX_SHA_256_SZ];
+	unsigned char login_data[AUTH_LOGIN_BUF_SIZE];
 	unsigned char token[TOKEN_BUFFER_LEN];
 	unsigned char secure_params[AUTH_SECURE_PARAMS_SIZE];
 };
