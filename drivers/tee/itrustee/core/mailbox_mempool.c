@@ -36,6 +36,7 @@
 #include "smc_smp.h"
 #include "ko_adapt.h"
 #include "internal_functions.h"
+#include "tee_compat_check.h"
 
 #define MAILBOX_PAGE_MAX (MAILBOX_POOL_SIZE >> PAGE_SHIFT)
 static int g_max_oder;
@@ -640,8 +641,12 @@ int re_register_mailbox(void)
 	mutex_unlock(&g_mb_lock);
 
 	if (mailbox_register(buffer, sizeof(struct mailbox_buffer) * g_mb_count) != 0) {
-		tloge("register mailbox failed\n");
-		ret = -EIO;
+		if (!is_kirin990_tee()) {
+			tloge("register mailbox failed\n");
+			ret = -EIO;
+		} else {
+			tlogw("legacy TEEOS refused mailbox register, continuing without it\n");
+		}
 	}
 
 	free_mailbox_buffer((uint64_t)(uintptr_t)buffer);
@@ -711,9 +716,20 @@ static int mailbox_init(uint32_t pool_count, mailbox_page_t **all_pages)
 	}
 
 	if (mailbox_register(buffer, sizeof(struct mailbox_buffer) * pool_count) != 0) {
-		tloge("register mailbox failed\n");
-		ret = -EIO;
-		goto clear;
+		if (!is_kirin990_tee()) {
+			tloge("register mailbox failed\n");
+			ret = -EIO;
+			goto clear;
+		}
+		/*
+		 * The 4.19 TEEOS wants the single contiguous pool protocol
+		 * instead of the mailbox_buffer array, so it refuses this and the
+		 * mailbox stays unregistered.  The TA image path does not use
+		 * the mailbox, so keep going with the pool count we allocated;
+		 * anything agent related will fail later and can be fixed then.
+		 */
+		tlogw("legacy TEEOS refused mailbox register, continuing without it\n");
+		g_mb_count = (uint32_t)MAILBOX_POOL_COUNT;
 	}
 
 	if (init_zone(all_pages) != 0) {
