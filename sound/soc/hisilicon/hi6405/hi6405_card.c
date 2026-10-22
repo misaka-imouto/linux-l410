@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * Huawei L410 sound card: ASP DMA PCM <-SLIMbus-> Hi6405 codec, and the
- * codec's I2S4 output feeding two TAS2562 speaker amplifiers.
+ * codec's I2S4 output feeding two speaker amplifiers.
+ *
+ * KLVU-WDU0B uses TAS2562 at I2C 0x4c/0x4e; KLVU-WDU0 uses CS35L36 at
+ * I2C 0x50/0x52.  The firmware tree describes both, the card picks the pair
+ * whose drivers actually probed.
  *
  * Replaces the vendor da_combine_machine.c ("codec_without_hifi" card).
  */
@@ -34,6 +38,27 @@
 /* book 0 / page 2: idle channel detection threshold, 32 bit big endian */
 #define TAS2562_IDC_DTH		(2 * 128 + 0x64)
 
+/* CS35L36 32-bit register space */
+#define CS35L36_REV_ID		0x0000200c
+#define CS35L36_PWR_CTRL1	0x00002014
+#define CS35L36_PWR_CTRL2	0x00002018
+#define CS35L36_PWR_CTRL3	0x0000201c
+#define CS35L36_AMP_OUT_MUTE	0x00002024
+#define CS35L36_AMP_MUTE_MASK	0x00000010
+#define CS35L36_ASP_RX1_SLOT	0x0000482c
+#define CS35L36_ASP_RX1_SLOT_MASK 0x0000003f
+#define CS35L36_ASP_RX_TX_EN	0x0000483c
+#define CS35L36_INT1_STATUS	0x00d00000
+#define CS35L36_INT3_STATUS	0x00d00008
+#define CS35L36_INT1_MASK	0x00d00040
+#define CS35L36_INT3_MASK	0x00d00048
+
+enum hi6405_amp_type {
+	HI6405_AMP_NONE,
+	HI6405_AMP_TAS2562,
+	HI6405_AMP_CS35L36,
+};
+
 struct hi6405_card {
 	struct snd_soc_card card;
 	struct snd_soc_dai_link links[2];
@@ -43,12 +68,21 @@ struct hi6405_card {
 	struct snd_soc_dai_link_component spk_cpu;
 	struct snd_soc_dai_link_component spk_codecs[2];
 	struct snd_soc_component *amps[2];
+	enum hi6405_amp_type amp_type;
 	struct dentry *debugfs;
 };
 
 /* I2S4 of the codec: 48 kHz stereo, one PA per slot */
-static const struct snd_soc_pcm_stream hi6405_spk_params = {
+static const struct snd_soc_pcm_stream hi6405_spk_params_tas = {
 	.formats = SNDRV_PCM_FMTBIT_S16_LE,
+	.rate_min = 48000,
+	.rate_max = 48000,
+	.channels_min = 2,
+	.channels_max = 2,
+};
+
+static const struct snd_soc_pcm_stream hi6405_spk_params_cs = {
+	.formats = SNDRV_PCM_FMTBIT_S32_LE,
 	.rate_min = 48000,
 	.rate_max = 48000,
 	.channels_min = 2,
@@ -57,10 +91,10 @@ static const struct snd_soc_pcm_stream hi6405_spk_params = {
 
 /*
  * The codec stops the I2S4 frame clock when its S4_TX_DRV widget powers down,
- * which DAPM does before it powers down the TAS2562 DAC widgets (out_drv goes
- * ahead of dac). An amp losing its clocks while playing drops out with a TDM
- * clock error, which pops. Before any widget powers down, shut both amps down
- * and give them the vendor's 20 ms to ramp out while the clocks still run.
+ * which DAPM does before it powers down the amplifier widgets.  An amp losing
+ * its clocks while playing drops out with a clock error, which pops.  Before
+ * any widget powers down, mute/shut both amps down and give them 20 ms to ramp
+ * out while the clocks still run.
  */
 static int hi6405_speaker_event(struct snd_soc_dapm_widget *w,
 	struct snd_kcontrol *kcontrol, int event)
@@ -69,10 +103,16 @@ static int hi6405_speaker_event(struct snd_soc_dapm_widget *w,
 		struct hi6405_card, card);
 	int i;
 
-	for (i = 0; i < ARRAY_SIZE(priv->amps); i++)
-		if (priv->amps[i])
+	for (i = 0; i < ARRAY_SIZE(priv->amps); i++) {
+		if (!priv->amps[i])
+			continue;
+		if (priv->amp_type == HI6405_AMP_TAS2562)
 			snd_soc_component_update_bits(priv->amps[i], TAS2562_PWR_CTRL,
 				TAS2562_MODE_MASK, TAS2562_MODE_SHUTDOWN);
+		else if (priv->amp_type == HI6405_AMP_CS35L36)
+			snd_soc_component_update_bits(priv->amps[i], CS35L36_AMP_OUT_MUTE,
+				CS35L36_AMP_MUTE_MASK, CS35L36_AMP_MUTE_MASK);
+	}
 	msleep(20);
 	return 0;
 }
@@ -94,7 +134,15 @@ static const struct snd_soc_dapm_widget hi6405_card_widgets[] = {
 	SND_SOC_DAPM_SINK("ASP Playback Sink"),
 };
 
-static const struct snd_soc_dapm_route hi6405_card_routes[] = {
+static const struct snd_soc_dapm_route hi6405_card_routes_common[] = {
+	{ "Headphone", NULL, "HP_L_OUTPUT" },
+	{ "Headphone", NULL, "HP_R_OUTPUT" },
+	{ "HSMIC_INPUT", NULL, "Headset Mic" },
+	{ "MIC_INPUT", NULL, "Internal Mic" },
+	{ "ASP Playback Sink", NULL, "AUDIO_PLAY_DRV" },
+};
+
+static const struct snd_soc_dapm_route hi6405_card_routes_tas[] = {
 	{ "Headphone", NULL, "HP_L_OUTPUT" },
 	{ "Headphone", NULL, "HP_R_OUTPUT" },
 	{ "HSMIC_INPUT", NULL, "Headset Mic" },
@@ -104,6 +152,16 @@ static const struct snd_soc_dapm_route hi6405_card_routes[] = {
 	{ "Speaker", NULL, "Right OUT" },
 };
 
+static const struct snd_soc_dapm_route hi6405_card_routes_cs[] = {
+	{ "Headphone", NULL, "HP_L_OUTPUT" },
+	{ "Headphone", NULL, "HP_R_OUTPUT" },
+	{ "HSMIC_INPUT", NULL, "Headset Mic" },
+	{ "MIC_INPUT", NULL, "Internal Mic" },
+	{ "ASP Playback Sink", NULL, "AUDIO_PLAY_DRV" },
+	{ "Speaker", NULL, "Left SPK" },
+	{ "Speaker", NULL, "Right SPK" },
+};
+
 static const struct snd_kcontrol_new hi6405_card_controls[] = {
 	SOC_DAPM_PIN_SWITCH("Speaker"),
 	SOC_DAPM_PIN_SWITCH("Internal Mic"),
@@ -111,11 +169,11 @@ static const struct snd_kcontrol_new hi6405_card_controls[] = {
 
 /*
  * Register values the vendor user space (hwaudioservice) wrote to both
- * amplifiers before first use, restricted to book 0 pages 0-4 (regmap range
- * of the upstream driver): boost current limit and class-H settings, and the
- * idle channel threshold at -90 dBFS. The chip default of -60 dBFS auto-mutes
- * the amp after 100 ms of quiet audio and restarts it when the level comes
- * back, over and over at low volume.
+ * TAS2562 amplifiers before first use, restricted to book 0 pages 0-4
+ * (regmap range of the upstream driver): boost current limit and class-H
+ * settings, and the idle channel threshold at -90 dBFS. The chip default of
+ * -60 dBFS auto-mutes the amp after 100 ms of quiet audio and restarts it
+ * when the level comes back, over and over at low volume.
  */
 static const struct {
 	unsigned int reg, val;
@@ -132,16 +190,25 @@ static const struct {
 };
 
 /*
- * Amplifier status straight from the chips (cache bypassed): power mode,
- * live and latched interrupt flags (read by l410-mainline tests/audio.sh).
+ * Amplifier status straight from the chips (cache bypassed), read by
+ * l410-mainline tests/audio.sh.
  */
 static int hi6405_amps_show(struct seq_file *m, void *unused)
 {
-	static const unsigned int regs[] = { 0x02, 0x03, 0x08, 0x1f, 0x20, 0x24, 0x25 };
+	static const unsigned int tas_regs[] = { 0x02, 0x03, 0x08, 0x1f, 0x20, 0x24, 0x25 };
+	static const unsigned int cs_regs[] = {
+		CS35L36_REV_ID, CS35L36_PWR_CTRL1, CS35L36_PWR_CTRL2,
+		CS35L36_PWR_CTRL3, CS35L36_AMP_OUT_MUTE,
+		CS35L36_ASP_RX1_SLOT, CS35L36_ASP_RX_TX_EN,
+		CS35L36_INT1_STATUS, CS35L36_INT3_STATUS,
+		CS35L36_INT1_MASK, CS35L36_INT3_MASK,
+	};
 	struct hi6405_card *priv = m->private;
 	int i, j;
 
 	for (i = 0; i < ARRAY_SIZE(priv->amps); i++) {
+		const unsigned int *regs;
+		unsigned int nregs;
 		struct regmap *map;
 
 		if (!priv->amps[i])
@@ -149,16 +216,23 @@ static int hi6405_amps_show(struct seq_file *m, void *unused)
 		map = dev_get_regmap(priv->amps[i]->dev, NULL);
 		if (!map)
 			continue;
+		if (priv->amp_type == HI6405_AMP_CS35L36) {
+			regs = cs_regs;
+			nregs = ARRAY_SIZE(cs_regs);
+		} else {
+			regs = tas_regs;
+			nregs = ARRAY_SIZE(tas_regs);
+		}
 		seq_printf(m, "%s:", dev_name(priv->amps[i]->dev));
 		regcache_cache_bypass(map, true);
-		for (j = 0; j < ARRAY_SIZE(regs); j++) {
+		for (j = 0; j < nregs; j++) {
 			unsigned int val = 0;
 			int ret = regmap_read(map, regs[j], &val);
 
 			if (ret)
-				seq_printf(m, " %02x=err%d", regs[j], ret);
+				seq_printf(m, " %06x=err%d", regs[j], ret);
 			else
-				seq_printf(m, " %02x=%02x", regs[j], val);
+				seq_printf(m, " %06x=%08x", regs[j], val);
 		}
 		regcache_cache_bypass(map, false);
 		seq_putc(m, '\n');
@@ -178,6 +252,13 @@ static int hi6405_spk_init(struct snd_soc_pcm_runtime *rtd)
 
 		if (i < ARRAY_SIZE(priv->amps))
 			priv->amps[i] = amp;
+
+		if (priv->amp_type == HI6405_AMP_CS35L36) {
+			/* RX1 is the left slot, RX2 the right slot */
+			snd_soc_component_update_bits(amp, CS35L36_ASP_RX1_SLOT,
+				CS35L36_ASP_RX1_SLOT_MASK, i);
+			continue;
+		}
 
 		/* 32-bit I2S slots, PA 0 takes the left slot, PA 1 the right */
 		ret = snd_soc_dai_set_tdm_slot(dai, 0x3, 0x3, 2, 32);
@@ -200,11 +281,11 @@ static int hi6405_spk_init(struct snd_soc_pcm_runtime *rtd)
 /*
  * The firmware tree describes both amplifier populations: TAS2562 at 0x4c/0x4e
  * (KLVU-WDU0B) and CS35L36 at 0x50/0x52 (KLVU-WDU0).  Only one pair is
- * populated.  The TAS2562 driver now refuses to bind when the chip does not
+ * populated.  The TAS2562 driver refuses to bind when the chip does not
  * answer, so an unbound client means "not this board"; a chip that has not
  * probed yet is probed directly over SMBus once more.
  */
-static bool hi6405_amp_present(struct device_node *np)
+static bool hi6405_tas2562_present(struct device_node *np)
 {
 	struct i2c_client *client;
 	bool present = false;
@@ -234,6 +315,23 @@ static bool hi6405_amp_present(struct device_node *np)
 out:
 	put_device(&client->dev);
 	return present;
+}
+
+static bool hi6405_i2c_client_bound(struct device_node *np)
+{
+	struct i2c_client *client;
+	bool bound;
+
+	if (!np)
+		return false;
+
+	client = of_find_i2c_device_by_node(np);
+	if (!client)
+		return false;
+
+	bound = device_is_bound(&client->dev);
+	put_device(&client->dev);
+	return bound;
 }
 
 static int hi6405_card_probe(struct platform_device *pdev)
@@ -276,12 +374,32 @@ static int hi6405_card_probe(struct platform_device *pdev)
 	priv->spk_codecs[0].of_node = of_parse_phandle(np, "hisilicon,speaker-amps", 0);
 	priv->spk_codecs[1].of_node = of_parse_phandle(np, "hisilicon,speaker-amps", 1);
 	if (priv->spk_codecs[0].of_node && priv->spk_codecs[1].of_node &&
-	    hi6405_amp_present(priv->spk_codecs[0].of_node) &&
-	    hi6405_amp_present(priv->spk_codecs[1].of_node)) {
+	    hi6405_tas2562_present(priv->spk_codecs[0].of_node) &&
+	    hi6405_tas2562_present(priv->spk_codecs[1].of_node)) {
+		priv->amp_type = HI6405_AMP_TAS2562;
+	} else {
+		of_node_put(priv->spk_codecs[0].of_node);
+		of_node_put(priv->spk_codecs[1].of_node);
+		priv->spk_codecs[0].of_node = of_parse_phandle(np,
+			"hisilicon,speaker-amps-cs35l36", 0);
+		priv->spk_codecs[1].of_node = of_parse_phandle(np,
+			"hisilicon,speaker-amps-cs35l36", 1);
+		if (priv->spk_codecs[0].of_node && priv->spk_codecs[1].of_node &&
+		    hi6405_i2c_client_bound(priv->spk_codecs[0].of_node) &&
+		    hi6405_i2c_client_bound(priv->spk_codecs[1].of_node))
+			priv->amp_type = HI6405_AMP_CS35L36;
+	}
+
+	if (priv->amp_type != HI6405_AMP_NONE) {
 		priv->spk_cpu.of_node = priv->pcm_codec.of_node;
 		priv->spk_cpu.dai_name = "DA_combine_v5-s4-dai";
-		priv->spk_codecs[0].dai_name = "tas2562-amplifier";
-		priv->spk_codecs[1].dai_name = "tas2562-amplifier";
+		if (priv->amp_type == HI6405_AMP_CS35L36) {
+			priv->spk_codecs[0].dai_name = "cs35l36-pcm";
+			priv->spk_codecs[1].dai_name = "cs35l36-pcm";
+		} else {
+			priv->spk_codecs[0].dai_name = "tas2562-amplifier";
+			priv->spk_codecs[1].dai_name = "tas2562-amplifier";
+		}
 
 		link = &priv->links[1];
 		link->name = "Hi6405 Speaker";
@@ -290,7 +408,11 @@ static int hi6405_card_probe(struct platform_device *pdev)
 		link->num_cpus = 1;
 		link->codecs = priv->spk_codecs;
 		link->num_codecs = 2;
-		link->c2c_params = &hi6405_spk_params;
+		if (priv->amp_type == HI6405_AMP_CS35L36) {
+			link->c2c_params = &hi6405_spk_params_cs;
+		} else {
+			link->c2c_params = &hi6405_spk_params_tas;
+		}
 		link->num_c2c_params = 1;
 		/* the codec's I2S4 is the bit/frame clock provider */
 		link->dai_fmt = SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_NB_NF |
@@ -299,9 +421,22 @@ static int hi6405_card_probe(struct platform_device *pdev)
 		link->ignore_pmdown_time = 1;
 		priv->card.num_links = 2;
 	} else if (priv->spk_codecs[0].of_node && priv->spk_codecs[1].of_node) {
-		dev_info(dev, "TAS2562 speaker amplifiers not populated, speaker disabled\n");
+		/*
+		 * The I2C drivers may not have probed yet.  Retry instead of
+		 * registering a card without the speaker link; both L410
+		 * variants have one of the two amplifier pairs.
+		 */
+		of_node_put(priv->spk_codecs[0].of_node);
+		of_node_put(priv->spk_codecs[1].of_node);
+		priv->spk_codecs[0].of_node = NULL;
+		priv->spk_codecs[1].of_node = NULL;
+		return dev_err_probe(dev, -EPROBE_DEFER, "waiting for speaker amplifiers\n");
 	} else {
-		dev_warn(dev, "no speaker amplifiers described, speaker disabled\n");
+		of_node_put(priv->spk_codecs[0].of_node);
+		of_node_put(priv->spk_codecs[1].of_node);
+		priv->spk_codecs[0].of_node = NULL;
+		priv->spk_codecs[1].of_node = NULL;
+		dev_info(dev, "no speaker amplifiers described, speaker disabled\n");
 	}
 
 	priv->card.dev = dev;
@@ -311,10 +446,16 @@ static int hi6405_card_probe(struct platform_device *pdev)
 	priv->card.dai_link = priv->links;
 	priv->card.dapm_widgets = hi6405_card_widgets;
 	priv->card.num_dapm_widgets = ARRAY_SIZE(hi6405_card_widgets);
-	priv->card.dapm_routes = hi6405_card_routes;
-	/* the speaker routes need the TAS2562 widgets */
-	priv->card.num_dapm_routes = ARRAY_SIZE(hi6405_card_routes) -
-		(priv->card.num_links == 2 ? 0 : 2);
+	if (priv->amp_type == HI6405_AMP_TAS2562) {
+		priv->card.dapm_routes = hi6405_card_routes_tas;
+		priv->card.num_dapm_routes = ARRAY_SIZE(hi6405_card_routes_tas);
+	} else if (priv->amp_type == HI6405_AMP_CS35L36) {
+		priv->card.dapm_routes = hi6405_card_routes_cs;
+		priv->card.num_dapm_routes = ARRAY_SIZE(hi6405_card_routes_cs);
+	} else {
+		priv->card.dapm_routes = hi6405_card_routes_common;
+		priv->card.num_dapm_routes = ARRAY_SIZE(hi6405_card_routes_common);
+	}
 	priv->card.controls = hi6405_card_controls;
 	priv->card.num_controls = ARRAY_SIZE(hi6405_card_controls);
 	of_property_read_string(np, "model", &priv->card.long_name);
