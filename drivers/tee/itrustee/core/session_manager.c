@@ -58,6 +58,7 @@
 #include "ko_adapt.h"
 #include "shared_mem.h"
 #include "tee_compat_check.h"
+#include "auth_enhance.h"
 
 static DEFINE_MUTEX(g_load_app_lock);
 #define MAX_REF_COUNT (512)
@@ -1118,6 +1119,16 @@ static int proc_open_session(struct tc_ns_dev_file *dev_file,
 		tloge("load ta image failed\n");
 		mutex_unlock(&service->operation_lock);
 		return ret;
+	}
+
+	/* negotiate the per-session AES key before sending open session */
+	if (is_kirin990_tee()) {
+		ret = auth_enhance_get_session_secure_params(dev_file, context, session);
+		if (ret != 0) {
+			tloge("get session secure params failed %d\n", ret);
+			mutex_unlock(&service->operation_lock);
+			return ret;
+		}
 	}
 
 	ret = tc_client_call(&params);

@@ -43,6 +43,8 @@
 #include "mem.h"
 #include "mailbox_mempool.h"
 #include "shared_mem.h"
+#include "tee_compat_check.h"
+#include "auth_enhance.h"
 #include "tc_client_driver.h"
 #include "internal_functions.h"
 #include "reserved_mempool.h"
@@ -988,6 +990,23 @@ static int init_smc_cmd(const struct tc_call_params *call_params,
 	/* if smc from kernel CA, set login_method to TEEK_LOGIN_IDENTIFY */
 	if (call_params->dev->kernel_api == TEE_REQ_FROM_KERNEL_MODE)
 		smc_cmd->login_method = TEEK_LOGIN_IDENTIFY;
+
+	/*
+	 * The 4.19 TEEOS expects the AUTH_ENHANCE token and encrypted session
+	 * parameters on GLOBAL_CMD_ID_OPEN_SESSION; without them it answers
+	 * TEE_ERROR_GENERIC.
+	 */
+	if (is_kirin990_tee() && global &&
+		smc_cmd->cmd_id == GLOBAL_CMD_ID_OPEN_SESSION) {
+		int ret = auth_enhance_fill_open_session(call_params, op_params);
+
+		if (ret != 0)
+			return ret;
+		tlogi("open sess phys: op=0x%x login=0x%x/0x%x tok=0x%x params=0x%x\n",
+			smc_cmd->operation_phys, smc_cmd->login_data_phy,
+			smc_cmd->login_data_len, smc_cmd->token_phys,
+			smc_cmd->params_phys);
+	}
 
 	return 0;
 }

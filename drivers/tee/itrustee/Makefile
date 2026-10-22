@@ -4,6 +4,7 @@ obj-$(CONFIG_TZDRIVER) += tzdriver.o
 tzdriver-objs := core/smc_smp.o core/tc_client_driver.o core/session_manager.o core/mailbox_mempool.o core/teek_app_load.o
 tzdriver-objs += core/agent.o core/gp_ops.o core/mem.o core/cmdmonitor.o core/tzdebug.o core/tz_spi_notify.o core/tz_pm.o core/tee_compat_check.o
 tzdriver-objs += auth/auth_base_impl.o auth/client_hash_auth.o tlogger/tlogger.o tlogger/log_pages_cfg.o ko_adapt.o
+tzdriver-objs += core/auth_enhance.o
 tzdriver-objs += core/reserved_mempool.o
 tzdriver-objs += core/shared_mem.o core/smc_abi.o
 tzdriver-objs += core/teek_client_api.o

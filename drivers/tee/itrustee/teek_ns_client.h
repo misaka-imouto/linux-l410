@@ -223,6 +223,15 @@ struct tc_ns_smc_cmd {
     unsigned int res_int[3]; /* 3 is limited by size of tc_ns_smc_queue, can't exceed 3 */
 	bool started;
     char res_chr[3]; /* 3 is limited by size of tc_ns_smc_queue, can't exceed 3 */
+	/*
+	 * CONFIG_AUTH_ENHANCE fields the vendor 4.19 queue entry carries after
+	 * ca_pid.  Kept at the end of the native struct; smc_cmd_to_wire() maps
+	 * them onto token_phys/token_h_phys/params_phys/params_h_phys.
+	 */
+	unsigned int token_phys;
+	unsigned int token_h_phys;
+	unsigned int params_phys;
+	unsigned int params_h_phys;
 } __attribute__((__packed__));
 
 /*
@@ -246,6 +255,57 @@ struct tc_ns_register_sharedmem {
 #else
 #define KIND_OF_SO 2
 #endif
+
+/*
+ * CONFIG_AUTH_ENHANCE, as used by the Kirin 990 4.19 TEEOS.
+ *
+ * The session parameters are an AES-256-CBC encrypted blob whose key is
+ * negotiated with TEEOS through GLOBAL_CMD_ID_GET_SESSION_SECURE_PARAMS.
+ * The blob is [head | payload] padded to 16 bytes and followed by the 16
+ * byte IV, exactly like the vendor kernel's generate_encrypted_session_
+ * secure_params().
+ */
+#define TOKEN_BUFFER_LEN         42
+#define CIPHER_KEY_BYTESIZE      32
+#define IV_BYTESIZE              16
+#define CIPHER_BLOCK_BYTESIZE    16
+#define SCRAMBLING_NUMBER        3
+#define AUTH_MAGIC_SIZE          16
+#define AUTH_MAGIC_STRING        "Trusted-magic"
+#define AUTH_ROOT_KEY_LEN        CIPHER_KEY_BYTESIZE
+
+struct auth_enhance_head {
+	int8_t magic[AUTH_MAGIC_SIZE];
+	uint32_t payload_len;
+};
+
+struct auth_session_crypto_info {
+	uint8_t key[CIPHER_KEY_BYTESIZE];
+	uint8_t iv[IV_BYTESIZE];
+};
+
+struct auth_session_secure_info {
+	uint32_t challenge_word;
+	uint32_t scrambling[SCRAMBLING_NUMBER];
+	struct auth_session_crypto_info crypto_info;
+};
+
+struct auth_session_secure_params {
+	struct auth_enhance_head head;
+	union {
+		struct {
+			uint32_t challenge_word;
+		} ree2tee;
+		struct {
+			uint32_t scrambling[SCRAMBLING_NUMBER];
+			struct auth_session_crypto_info crypto_info;
+		} tee2ree;
+	} payload;
+};
+
+/* sizeof(head)=20, payload.tee2ree=60 -> 80; +16 byte trailing IV = 96 */
+#define AUTH_SECURE_PARAMS_SIZE 96
+
 struct tc_ns_session {
 	unsigned int session_id;
 	struct list_head head;
@@ -256,12 +316,15 @@ struct tc_ns_session {
 	struct tc_ns_register_sharedmem register_sharedmem;
 #endif
 	uint8_t auth_hash_buf[MAX_SHA_256_SZ * NUM_OF_SO + MAX_SHA_256_SZ];
+	struct auth_session_secure_info secure_info;
 	atomic_t usage;
 };
 
 struct mb_cmd_pack {
 	struct tc_ns_operation operation;
 	unsigned char login_data[MAX_SHA_256_SZ * NUM_OF_SO + MAX_SHA_256_SZ];
+	unsigned char token[TOKEN_BUFFER_LEN];
+	unsigned char secure_params[AUTH_SECURE_PARAMS_SIZE];
 };
 
 struct load_img_params {

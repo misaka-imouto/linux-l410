@@ -58,6 +58,7 @@
 #include "tc_ns_log.h"
 #include "teek_client_constants.h"
 #include "tc_ns_client.h"
+#include "auth_enhance.h"
 #include "agent.h"
 #include "teek_ns_client.h"
 #include "mailbox_mempool.h"
@@ -253,6 +254,10 @@ static void smc_cmd_to_wire(const struct tc_ns_smc_cmd *in,
 	out->pid = in->pid;
 	out->eventindex = in->eventindex;
 	out->started = in->started;
+	out->token_phys = in->token_phys;
+	out->token_h_phys = in->token_h_phys;
+	out->params_phys = in->params_phys;
+	out->params_h_phys = in->params_h_phys;
 }
 
 static void smc_cmd_from_wire(const struct tc_ns_smc_cmd_wire *in,
@@ -278,6 +283,10 @@ static void smc_cmd_from_wire(const struct tc_ns_smc_cmd_wire *in,
 	out->pid = in->pid;
 	out->eventindex = in->eventindex;
 	out->started = in->started;
+	out->token_phys = in->token_phys;
+	out->token_h_phys = in->token_h_phys;
+	out->params_phys = in->params_phys;
+	out->params_h_phys = in->params_h_phys;
 	/* fields the vendor queue entry does not carry */
 	out->nsid = 0;
 	out->vmid = 0;
@@ -2188,6 +2197,12 @@ int parse_params_from_tee(void)
 		tloge("check teeos compatibility failed\n");
 		return ret;
 	}
+	/*
+	 * TEEOS leaves the AUTH_ENHANCE root key right after the legacy magic
+	 * (in[0] + 4), exactly where the 4.19 get_session_root_key() reads it.
+	 */
+	if (is_kirin990_tee())
+		auth_enhance_set_root_key((const uint8_t *)buffer + 4);
 	if (memset_s(buffer, sizeof(g_cmd_data->in),
 		0, sizeof(g_cmd_data->in)) != EOK) {
 		tloge("Clean the command buffer failed\n");
