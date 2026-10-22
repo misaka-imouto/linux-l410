@@ -357,6 +357,16 @@ out:
  * The vendor combines it with the session token and syncs the timestamp;
  * start by passing it through unchanged.
  */
+static bool ae_is_zero(const uint8_t *p, uint32_t n)
+{
+	uint32_t i;
+
+	for (i = 0; i < n; i++)
+		if (p[i])
+			return false;
+	return true;
+}
+
 static void ae_bump_timestamp(uint8_t *token, const struct tc_ns_session *s)
 {
 	const uint8_t *key = (const uint8_t *)s->secure_info.scrambling;
@@ -405,8 +415,15 @@ int auth_enhance_fill_invoke_token(const struct tc_call_params *call_params,
 	if (sess && sess->teec_token_valid) {
 		(void)memcpy_s(mb_pack->token, sizeof(mb_pack->token),
 			sess->teec_token, sizeof(sess->teec_token));
-		/* merge the libteec 16 byte token */
-		(void)memcpy_s(mb_pack->token, 16, lib, 16);
+		/*
+		 * Merge the libteec 16 byte token, but only when it is real.  On
+		 * this 4.19 user space the buffer at context+0x90 is all zero
+		 * (the vendor saves the open-issued token there via
+		 * post_process_token(), which we cannot do without hanging), so
+		 * keep the TEE-issued token[0..15] from the open response.
+		 */
+		if (!ae_is_zero(lib, 16))
+			(void)memcpy_s(mb_pack->token, 16, lib, 16);
 		mb_pack->token[AUTH_API_INDEX] =
 			(uint8_t)call_params->dev->kernel_api;
 		ae_bump_timestamp(mb_pack->token, sess);
