@@ -948,7 +948,16 @@ retry:
 				}
 				goto out;
 			}
+			/*
+			 * Vendor send_smc_cmd_with_retry() only reschedules when the
+			 * kernel is not preemptible.  With CONFIG_PREEMPT=y an explicit
+			 * cond_resched() here parks the caller until the next 4ms tick
+			 * on every PREEMPTED round-trip, turning a fast TEE command
+			 * into thousands of 4ms sleeps.
+			 */
+#if (!defined(CONFIG_PREEMPT)) || defined(CONFIG_RTOS_PREEMPT_OFF)
 			cond_resched();
+#endif
 			goto retry;
 		}
 	}
