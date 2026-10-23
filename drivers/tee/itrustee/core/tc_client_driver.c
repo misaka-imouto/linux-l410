@@ -1068,10 +1068,11 @@ static int tc_client_agent_ioctl(const struct file *file, unsigned int cmd,
 		ret = public_ioctl(file, cmd, arg, true);
 		break;
 	default:
-		/* teecd probes SYNC_SYS_TIME (0xc0087411) and
-		 * GET_TEE_VERSION on startup; the client node does not serve
-		 * them, and logging that at error level polluted the kernel
-		 * log on every boot. */
+		/*
+		 * teecd probes SYNC_SYS_TIME (0xc0087411) and GET_TEE_VERSION
+		 * on startup; the client node does not serve them, and logging
+		 * that at error level polluted the kernel log on every boot.
+		 */
 		tlogd("invalid cmd 0x%x!", cmd);
 		break;
 	}

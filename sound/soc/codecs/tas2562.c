@@ -414,9 +414,11 @@ static int tas2562_reset(struct tas2562_data *tas2562)
 	 */
 	ret = regmap_read(tas2562->regmap, TAS2562_REV_ID, &val);
 	if (ret) {
-		/* Expected on the L410 variant that ships CS35L36 amplifiers:
+		/*
+		 * Expected on the L410 variant that ships CS35L36 amplifiers:
 		 * the firmware tree still lists the TAS2562 nodes, so probing
-		 * them and failing is normal, not an error. */
+		 * them and failing is normal, not an error.
+		 */
 		dev_info(tas2562->dev, "no response after reset: %d\n", ret);
 		return ret;
 	}
