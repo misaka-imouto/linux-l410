@@ -726,12 +726,12 @@ static int mailbox_init(uint32_t pool_count, mailbox_page_t **all_pages)
 		 * takes its physical address and total size, not the newer
 		 * mailbox_buffer array.
 		 */
-		tloge("legacy mailbox register: vaddr=0x%lx size=%u\n",
+		tlogi("legacy mailbox register: vaddr=0x%lx size=%u\n",
 			(unsigned long)mailbox_page_address(all_pages[0]),
 			(unsigned int)MAILBOX_POOL_SIZE);
 		ret = mailbox_register((const void *)mailbox_page_address(all_pages[0]),
 			MAILBOX_POOL_SIZE);
-		tloge("legacy mailbox register ret=%d\n", ret);
+		tlogi("legacy mailbox register ret=%d\n", ret);
 		if (ret != 0) {
 			tlogw("legacy TEEOS refused mailbox register, continuing without it\n");
 			g_mb_count = (uint32_t)MAILBOX_POOL_COUNT;

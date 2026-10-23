@@ -970,7 +970,7 @@ retry:
 			if (g_smc_debug && dbg_logged < SMC_RETRY_LOG_MAX) {
 				u64 now = ktime_get_ns();
 
-				tloge("SMCRETRY n=%d cmd=0x%x ret=0x%lx exit=0x%lx ta=0x%lx tgt=0x%lx cpu=%d in_smc_us=%llu round_us=%llu\n",
+				tlogi("SMCRETRY n=%d cmd=0x%x ret=0x%lx exit=0x%lx ta=0x%lx tgt=0x%lx cpu=%d in_smc_us=%llu round_us=%llu\n",
 					retry_count, cmd_id, out_param.ret,
 					out_param.exit_reason, out_param.ta,
 					out_param.target, raw_smp_processor_id(),
@@ -997,8 +997,15 @@ out:
 	{
 		u64 smc_us = div_u64(ktime_get_ns() - smc_t0, 1000);
 
-		if (retry_count > 0 || preempt_seen > 0 || smc_us > 100000)
-			tloge("SMCSTAT cmd=0x%x idx=%d retries=%d preempt=%d us=%llu ret=0x%lx exit=0x%lx done=%d\n",
+		/*
+		 * A PREEMPTED round-trip per NS tick is the normal protocol, and
+		 * smc_svc_thread() sends SET_SERVE_CMD every 100ms, so logging
+		 * every retried command at error level filled the kernel log
+		 * with thousands of lines.  Report only expensive commands, and
+		 * at info level; smc_debug=1 keeps the verbose behaviour.
+		 */
+		if (g_smc_debug || smc_us > 50000)
+			tlogi("SMCSTAT cmd=0x%x idx=%d retries=%d preempt=%d us=%llu ret=0x%lx exit=0x%lx done=%d\n",
 				cmd_id, cmd_index, retry_count, preempt_seen,
 				(unsigned long long)smc_us, out_param.ret,
 				out_param.exit_reason,
@@ -2240,6 +2247,15 @@ static int init_smc_related_rsrc(const struct device *class_dev)
 	}
 	g_ipi_helper_thread = g_ipi_helper_worker->task;
 	tz_kthread_bind_mask(g_ipi_helper_thread);
+	/*
+	 * tz_kthread_bind_mask() -> kthread_bind_mask() uses
+	 * wait_task_inactive(TASK_UNINTERRUPTIBLE) on a thread that has not
+	 * started yet, which leaves it asleep with no pending wakeup.  The siq
+	 * thread is woken right below for the same reason; without this the
+	 * "ipihelper" worker sits in D forever (hung task warnings, and it then
+	 * refuses to freeze on suspend).
+	 */
+	wake_up_process(g_ipi_helper_thread);
 	wake_up_process(g_siq_thread);
 	init_cmd_monitor();
 	INIT_LIST_HEAD(&g_pending_head);
