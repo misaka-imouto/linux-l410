@@ -127,6 +127,34 @@ static int g_acpi_irq;
 #endif
 
 static unsigned int g_device_file_cnt = 1;
+
+/*
+ * Group id used to key sessions and agents for this device file.
+ *
+ * The legacy Kirin 990 command layout (struct tc_ns_smc_cmd_wire) has no
+ * nsid/vmid fields at all, and proc_tc_ns_smc() always sends 0 there, so any
+ * value the TEE sends back carries nsid 0.  init_nsid_vmid() would use
+ * PROC_PID_INIT_INO instead, which made every agent lookup miss:
+ *
+ *   [tzdriver] (600, fingerprint_dae)init_agent_context:
+ *           agent 0x46536673 nsid 0x0 vmid 0x0 not exist
+ *
+ * teecd registers the "FSfs" agent (0x46536673) and the TEE then posts the
+ * TA's SFS (secure storage) requests to it, so the mismatch kept the SFS
+ * unbacked: teecd did no file I/O, and the fingerprint TA's end_enrol could
+ * not store the template (it reports 0xffffffbb in params[1].value.a).
+ * Key everything with 0 on this TEEOS so registration and lookup agree.
+ */
+static void init_client_group(struct tc_ns_dev_file *dev_file)
+{
+	if (is_kirin990_tee()) {
+		dev_file->nsid = 0;
+		dev_file->vmid = 0;
+		return;
+	}
+
+	init_nsid_vmid(&dev_file->nsid, &dev_file->vmid);
+}
 static DEFINE_MUTEX(g_device_file_cnt_lock);
 static DEFINE_MUTEX(g_set_ca_hash_lock);
 
@@ -1191,8 +1219,7 @@ static long tc_private_ioctl(struct file *file, unsigned int cmd,
 	int ret = -EFAULT;
 	void *argp = (void __user *)(uintptr_t)arg;
 	if (file != NULL && file->private_data != NULL && ((struct tc_ns_dev_file *)(file->private_data))->vmid == 0)
-		init_nsid_vmid(&(((struct tc_ns_dev_file *)(file->private_data))->nsid),
-			&(((struct tc_ns_dev_file *)(file->private_data))->vmid));
+		init_client_group((struct tc_ns_dev_file *)(file->private_data));
 
 	handle_cmd_prepare(cmd);
 	switch (cmd) {
@@ -1234,8 +1261,7 @@ static long tc_client_ioctl(struct file *file, unsigned int cmd,
 	int ret = -EFAULT;
 	void *argp = (void __user *)(uintptr_t)arg;
 	if (file != NULL && file->private_data != NULL && ((struct tc_ns_dev_file *)(file->private_data))->vmid == 0)
-		init_nsid_vmid(&(((struct tc_ns_dev_file *)(file->private_data))->nsid),
-			&(((struct tc_ns_dev_file *)(file->private_data))->vmid));
+		init_client_group((struct tc_ns_dev_file *)(file->private_data));
 
 	handle_cmd_prepare(cmd);
 	switch (cmd) {

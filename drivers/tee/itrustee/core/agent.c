@@ -79,6 +79,17 @@ struct agent_pair {
 
 static struct agent_control g_agent_control;
 
+/*
+ * Send GLOBAL_CMD_ID_REGISTER_AGENT for teecd's fs/misc agents as well, i.e.
+ * do what the 4.19 vendor driver does.  Dropping it was a workaround for a
+ * hang whose real cause (the missing TEE notify page) is fixed, and skipping
+ * it left the TA without an SFS backend; see tc_ns_register_agent().
+ */
+static bool g_agent_register_user = true;
+module_param_named(agent_register_user, g_agent_register_user, bool, 0644);
+MODULE_PARM_DESC(agent_register_user,
+	"send REGISTER_AGENT to the TEE for user agents like teecd (4.19 vendor behaviour, default on)");
+
 static void process_send_event_response(struct smc_event_data *event_data, bool force);
 int __attribute__((weak)) is_allowed_agent_ca(const struct ca_info *ca,
 	bool check_agent_id)
@@ -1004,8 +1015,7 @@ static int get_agent_buffer(struct smc_event_data *event_data,
 int tc_ns_register_agent(struct tc_ns_dev_file *dev_file,
 	unsigned int agent_id, unsigned int buffer_size,
 	void **buffer, bool user_agent)
-{
-	struct smc_event_data *event_data = NULL;
+{	struct smc_event_data *event_data = NULL;
 	int ret = -EINVAL;
 	void *agent_buff = NULL;
 	uint32_t size_align, nsid = dev_file->nsid, vmid = dev_file->vmid, find_flag = AGENT_NO_EXIST;
@@ -1042,14 +1052,19 @@ int tc_ns_register_agent(struct tc_ns_dev_file *dev_file,
 	/* find_flag is false means it's a new agent register */
 	if (find_flag == AGENT_NO_EXIST || find_flag == AGENT_READY_TO_UNREG) {
 		/*
-		 * The 4.19 vendor kernel does not send GLOBAL_CMD_ID_REGISTER_AGENT
-		 * for user agents from tc_ns_register_agent(); it only sets up the
-		 * shared buffer and lets the TA's own agent registration stand.
-		 * Sending that command here makes the Kirin 990 TEE never mark the
-		 * command done, so teecd hangs on its fs/misc agents.  Keep the
-		 * SMC registration for kernel agents only.
+		 * GLOBAL_CMD_ID_REGISTER_AGENT hands the agent's shared buffer to the
+		 * TEE; without it the TA has no buffer to post fs/misc work into and
+		 * the SFS (secure storage) path fails.  The 4.19 vendor kernel does
+		 * send it for every new agent, teecd's fs/misc agents included
+		 * (verified by disassembling tc_ns_register_agent at
+		 * 0xffffff8008e03370 -> register_agent_to_tee at 0xffffff8008e01940).
+		 * openEuler later added the user_agent/kernel_agent split, and on the
+		 * Kirin 990 TEE this command once appeared to never complete, so it
+		 * was dropped for user agents.  That symptom was the missing TEE->NS
+		 * notify page (see tz_spi_init), which is now registered, so keep the
+		 * vendor behaviour switchable to check the SFS path again.
 		 */
-		if (!user_agent) {
+		if (!user_agent || g_agent_register_user) {
 			/*
 			 * Obtain share memory which is released
 			 * in tc_ns_unregister_agent
@@ -1057,9 +1072,14 @@ int tc_ns_register_agent(struct tc_ns_dev_file *dev_file,
 			ret = register_agent_to_tee(agent_id, nsid, vmid,
 				event_data->agent_buff_kernel, size_align);
 			if (ret != 0) {
+				tloge("register agent 0x%x to tee failed (%d)\n",
+					agent_id, ret);
 				unmap_agent_buffer(event_data);
 				goto release_rsrc;
 			}
+			tlogi("agent 0x%x registered with tee (%s, %u bytes) nsid=0x%x vmid=0x%x\n",
+				agent_id, user_agent ? "user" : "kernel", size_align,
+				event_data->nsid, event_data->vmid);
 		}
 		if (find_flag == AGENT_NO_EXIST)
 			add_event_node_to_list(event_data);
