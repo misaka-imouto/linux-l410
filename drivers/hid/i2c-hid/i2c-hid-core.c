@@ -67,6 +67,9 @@
 #define I2C_HID_STARTED		0
 #define I2C_HID_RESET_PENDING	1
 
+#define I2C_HID_DESC_TRIES	3	/* EC-backed devices need a moment after boot */
+#define I2C_HID_DESC_RETRY_MS	20
+
 #define I2C_HID_PWR_ON		0x00
 #define I2C_HID_PWR_SLEEP	0x01
 
@@ -904,11 +907,27 @@ static int i2c_hid_fetch_hid_descriptor(struct i2c_hid *ihid)
 		ihid->hdesc =
 			*i2c_hid_get_dmi_i2c_hid_desc_override(client->name);
 	} else {
+		int tries;
+
 		i2c_hid_dbg(ihid, "Fetching the HID descriptor\n");
-		error = i2c_hid_read_register(ihid,
-					      ihid->wHIDDescRegister,
-					      &ihid->hdesc,
-					      sizeof(ihid->hdesc));
+		/*
+		 * On the L410 the HID devices sit behind the EC (keyboard,
+		 * touchpad), and right after boot the first descriptor read can
+		 * come back as all zeros.  Without a retry that aborts the
+		 * probe with "unexpected HID descriptor bcdVersion (0x0000)"
+		 * and the keyboard/panel would be missing on that boot.
+		 */
+		for (tries = 0; tries < I2C_HID_DESC_TRIES; tries++) {
+			if (tries)
+				msleep(I2C_HID_DESC_RETRY_MS);
+			error = i2c_hid_read_register(ihid,
+						      ihid->wHIDDescRegister,
+						      &ihid->hdesc,
+						      sizeof(ihid->hdesc));
+			if (!error &&
+			    le16_to_cpu(ihid->hdesc.bcdVersion) == 0x0100)
+				break;
+		}
 		if (error) {
 			dev_err(&ihid->client->dev,
 				"failed to fetch HID descriptor: %d\n",

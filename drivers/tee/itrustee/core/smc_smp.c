@@ -2063,6 +2063,16 @@ static int smc_svc_thread_fn(void *arg)
 		struct tc_ns_smc_cmd smc_cmd = { {0}, 0 };
 		int ret;
 
+		/*
+		 * This thread only sleeps in msleep_interruptible() between
+		 * commands, so without an explicit try_to_freeze() it never
+		 * enters the refrigerator and suspend fails with
+		 * "Freezing remaining freezable tasks failed ... 1 tasks
+		 * refusing to freeze".  The freezer's fake signal wakes the
+		 * msleep, so checking here is enough.
+		 */
+		try_to_freeze();
+
 		smc_cmd.cmd_type = CMD_TYPE_GLOBAL;
 		smc_cmd.cmd_id = GLOBAL_CMD_ID_SET_SERVE_CMD;
 		ret = smp_smc_send_func(&smc_cmd, false, false);
