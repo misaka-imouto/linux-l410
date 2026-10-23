@@ -96,6 +96,29 @@
 static struct class *g_driver_class;
 static struct device_node *g_dev_node;
 
+/*
+ * The Kirin 990 TEEOS speaks the 4.19 vendor protocol, so tz_spi_init() (the
+ * TEE->NS notify page + secure SPI interrupt, GICv3 376 "tc_ns_client" here)
+ * used to be skipped because the openEuler-era registration command timed out
+ * and only made the module load slow.  Skipping it silently removed the only
+ * way the TEE can tell the NS side that a running TA needs attention, which
+ * degraded every long TA command into a 4ms-per-round busy loop: TA cmd 0
+ * (fpc_tac_init_lib) needed 210s / ~23s of TEE CPU instead of 0.62s (UOS 4.19
+ * needs 0.68s).  Keep the vendor path on by default, with a switch for
+ * bisecting.
+ */
+static bool g_kirin990_notify = true;
+module_param_named(kirin990_notify, g_kirin990_notify, bool, 0644);
+MODULE_PARM_DESC(kirin990_notify,
+	"register the TEE notify page/IRQ on Kirin 990 TEEOS (default on)");
+
+/* The vendor 4.19 kernel relays TEEOS/TA logs to the kernel log through the
+ * tlogger.  It used to time out during init on this TEEOS, but it is the only
+ * window into the secure side while bringing the fingerprint TA up. */
+static bool g_kirin990_tlogger;
+module_param_named(kirin990_tlogger, g_kirin990_tlogger, bool, 0644);
+MODULE_PARM_DESC(kirin990_tlogger, "register the TEEOS log memory on Kirin 990");
+
 struct dev_node g_tc_client;
 struct dev_node g_tc_private;
 
@@ -1676,13 +1699,15 @@ static int tc_teeos_init(struct device *class_dev)
 		goto release_resmem;
 	}
 
-	if (!is_kirin990_tee()) {
+	if (!is_kirin990_tee() || g_kirin990_notify) {
 		ret = tz_spi_init(class_dev, g_dev_node);
 		if (ret != 0) {
 			tloge("tz spi init failed\n");
 			goto release_mempool;
 		}
+	}
 
+	if (!is_kirin990_tee()) {
 		ret = tc_ns_register_host_nsid_vmid();
 		if (ret != 0) {
 			tlogw("register host nsid not supported or failed (%d), continuing\n", ret);
@@ -1717,7 +1742,7 @@ static void tc_re_init(const struct device *class_dev)
 		tloge("Failed to register ion mem in tee\n");
 
 #ifdef CONFIG_TZDRIVER_MODULE
-	if (!is_kirin990_tee()) {
+	if (!is_kirin990_tee() || g_kirin990_tlogger) {
 		ret = init_tlogger_service();
 		if (ret != 0)
 			tloge("tlogger init failed\n");

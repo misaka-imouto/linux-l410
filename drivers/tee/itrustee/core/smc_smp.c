@@ -887,6 +887,17 @@ struct smc_send_param {
 	unsigned long ca;
 };
 
+/*
+ * smc_debug=1 logs how a PREEMPTED round-trip splits between the time spent
+ * inside smc #0 (TEE) and the time spent in the NS loop around it.  It is the
+ * only way to tell a slow TEE from a slow caller without a function tracer.
+ */
+static unsigned int g_smc_debug;
+module_param_named(smc_debug, g_smc_debug, uint, 0644);
+MODULE_PARM_DESC(smc_debug, "log per-retry smc #0 vs loop cost (0/1)");
+
+#define SMC_RETRY_LOG_MAX 24
+
 static noinline int smp_smc_send(struct smc_send_param param,
 	struct smc_cmd_ret *secret, bool need_kill, uint32_t cmd_id, bool skip_kill, int cmd_index)
 {
@@ -895,6 +906,9 @@ static noinline int smp_smc_send(struct smc_send_param param,
 	int retry_count = 0;
 	u64 smc_t0 = ktime_get_ns();
 	int preempt_seen = 0;
+	u64 in_smc_ns = 0;
+	u64 round_t0 = smc_t0;
+	int dbg_logged = 0;
 #if (CONFIG_CPU_AFF_NR != 0) || (defined CONFIG_CPU_BINDING)
 	struct cpumask old_mask;
 #endif
@@ -905,7 +919,12 @@ static noinline int smp_smc_send(struct smc_send_param param,
 retry:
 	set_smc_send_arg(&in_param, secret, param.ops);
 	tee_trace_add_event(SMC_SEND, 0);
-	send_smc_cmd(&in_param, &out_param, 0);
+	{
+		u64 t_in = ktime_get_ns();
+
+		send_smc_cmd(&in_param, &out_param, 0);
+		in_smc_ns += ktime_get_ns() - t_in;
+	}
 	tee_trace_add_event(SMC_DONE, 0);
 	tlogd("[cpu %d] SMC call ret=%lx exit=%lx ta=%lx targ=%lx\n",
 		raw_smp_processor_id(), out_param.ret, out_param.exit_reason,
@@ -948,6 +967,19 @@ retry:
 				}
 				goto out;
 			}
+			if (g_smc_debug && dbg_logged < SMC_RETRY_LOG_MAX) {
+				u64 now = ktime_get_ns();
+
+				tloge("SMCRETRY n=%d cmd=0x%x ret=0x%lx exit=0x%lx ta=0x%lx tgt=0x%lx cpu=%d in_smc_us=%llu round_us=%llu\n",
+					retry_count, cmd_id, out_param.ret,
+					out_param.exit_reason, out_param.ta,
+					out_param.target, raw_smp_processor_id(),
+					(unsigned long long)div_u64(in_smc_ns, 1000),
+					(unsigned long long)div_u64(now - round_t0, 1000));
+				dbg_logged++;
+				round_t0 = now;
+				in_smc_ns = 0;
+			}
 			/*
 			 * Vendor send_smc_cmd_with_retry() only reschedules when the
 			 * kernel is not preemptible.  With CONFIG_PREEMPT=y an explicit
@@ -966,10 +998,11 @@ out:
 		u64 smc_us = div_u64(ktime_get_ns() - smc_t0, 1000);
 
 		if (retry_count > 0 || preempt_seen > 0 || smc_us > 100000)
-			tloge("SMCSTAT cmd=0x%x idx=%d retries=%d preempt=%d us=%llu ret=0x%lx exit=0x%lx\n",
+			tloge("SMCSTAT cmd=0x%x idx=%d retries=%d preempt=%d us=%llu ret=0x%lx exit=0x%lx done=%d\n",
 				cmd_id, cmd_index, retry_count, preempt_seen,
 				(unsigned long long)smc_us, out_param.ret,
-				out_param.exit_reason);
+				out_param.exit_reason,
+				(cmd_index >= 0) ? (int)is_cmd_working_done((uint32_t)cmd_index) : -1);
 	}
 #if (CONFIG_CPU_AFF_NR != 0) || (defined CONFIG_CPU_BINDING)
 	restore_cpu(&old_mask);
@@ -2108,6 +2141,12 @@ static int proc_tc_ns_smc(struct tc_ns_smc_cmd *cmd, bool reuse, bool skip_kill)
 	item = cmd_monitor_log(cmd);
 	ret = smp_smc_send_func(cmd, reuse, skip_kill);
 	cmd_monitor_logend(item);
+
+	/* smc_debug=2 traces every TA/global command, which is how the enroll
+	 * and finger-detect state machines of the vendor HAL were mapped. */
+	if (g_smc_debug > 1)
+		tlogi("SMCCMD pid=%d cmd=0x%x type=%u ret=%d\n",
+			current->pid, cmd->cmd_id, cmd->cmd_type, ret);
 
 	return ret;
 }
