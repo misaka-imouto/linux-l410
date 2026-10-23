@@ -893,6 +893,8 @@ static noinline int smp_smc_send(struct smc_send_param param,
 	struct smc_in_params in_param = { param.cmd, param.ops, param.ca, 0, 0 };
 	struct smc_out_params out_param = {0};
 	int retry_count = 0;
+	u64 smc_t0 = ktime_get_ns();
+	int preempt_seen = 0;
 #if (CONFIG_CPU_AFF_NR != 0) || (defined CONFIG_CPU_BINDING)
 	struct cpumask old_mask;
 #endif
@@ -914,6 +916,7 @@ retry:
 	secret->target = out_param.target;
 
 	if (out_param.exit_reason == SMC_EXIT_PREEMPTED) {
+		preempt_seen++;
 		/* If TEE already marked this command as done in the shared buffer,
 		 * the operation succeeded and there is no need to keep looping.
 		 */
@@ -950,6 +953,15 @@ retry:
 		}
 	}
 out:
+	{
+		u64 smc_us = div_u64(ktime_get_ns() - smc_t0, 1000);
+
+		if (retry_count > 0 || preempt_seen > 0 || smc_us > 100000)
+			tloge("SMCSTAT cmd=0x%x idx=%d retries=%d preempt=%d us=%llu ret=0x%lx exit=0x%lx\n",
+				cmd_id, cmd_index, retry_count, preempt_seen,
+				(unsigned long long)smc_us, out_param.ret,
+				out_param.exit_reason);
+	}
 #if (CONFIG_CPU_AFF_NR != 0) || (defined CONFIG_CPU_BINDING)
 	restore_cpu(&old_mask);
 #endif
