@@ -37,6 +37,7 @@
 
 #define ECHUB_MAX_DATA		8
 #define ECHUB_XFER_GAP_US	10000	/* the vendor driver waits 10 ms between requests */
+#define ECHUB_BUSY_BACKOFF_MS	25	/* the EC answers "busy" while its own work runs */
 #define ECHUB_XFER_TRIES	3
 
 struct huawei_echub {
@@ -133,15 +134,24 @@ static int __echub_read(struct huawei_echub *ec, u16 reg, u8 arg, u8 *data, size
  */
 int huawei_echub_read(struct huawei_echub *ec, u16 reg, u8 arg, u8 *data, size_t len)
 {
-	int i, ret;
+	int i, ret = -EIO;
 
 	if (!len || len > ECHUB_MAX_DATA)
 		return -EINVAL;
 
 	guard(mutex)(&ec->lock);
 	for (i = 0; i < ECHUB_XFER_TRIES; i++) {
-		if (i)
+		if (i) {
 			ec->retries++;
+			/*
+			 * A non-zero status byte means the EC is busy with its
+			 * own work (battery/AC polling); it answers those with
+			 * an error for a few dozen ms, and the plain 10 ms frame
+			 * gap is too short to catch the next free window.
+			 */
+			if (ret == -EIO)
+				fsleep(ECHUB_BUSY_BACKOFF_MS * i * 1000);
+		}
 		ret = __echub_read(ec, reg, arg, data, len);
 		if (!ret)
 			return 0;
@@ -183,12 +193,21 @@ static int __echub_write(struct huawei_echub *ec, u16 reg, u8 arg)
  */
 int huawei_echub_write(struct huawei_echub *ec, u16 reg, u8 arg)
 {
-	int i, ret;
+	int i, ret = -EIO;
 
 	guard(mutex)(&ec->lock);
 	for (i = 0; i < ECHUB_XFER_TRIES; i++) {
-		if (i)
+		if (i) {
 			ec->retries++;
+			/*
+			 * A non-zero status byte means the EC is busy with its
+			 * own work (battery/AC polling); it answers those with
+			 * an error for a few dozen ms, and the plain 10 ms frame
+			 * gap is too short to catch the next free window.
+			 */
+			if (ret == -EIO)
+				fsleep(ECHUB_BUSY_BACKOFF_MS * i * 1000);
+		}
 		ret = __echub_write(ec, reg, arg);
 		if (!ret)
 			return 0;
