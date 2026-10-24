@@ -130,6 +130,15 @@ static long fingerprint_ioctl_internal(struct fingerprint_data *fp,
 		 * finger even though the sensor and its interrupt worked.
 		 */
 		mutex_lock(&fp->lock);
+		/*
+		 * Drop anything the handler picked up earlier (probe, a previous
+		 * wait that got cancelled, the sensor pulsing while the line was
+		 * asserted) before arming: otherwise the first poll() returns
+		 * "interrupt" immediately, the HAL asks the TA, sees no finger
+		 * and re-arms - the ~20ms spin instead of waiting for a touch.
+		 */
+		atomic_set(&fp->irq_count, 0);
+		atomic_set(&fp->irq_latched, 0);
 		if (!fp->irq_enabled) {
 			enable_irq(fp->irq);
 			fp->irq_enabled = true;
