@@ -55,6 +55,7 @@ struct fingerprint_data {
 
 	bool irq_enabled;
 	atomic_t irq_count;
+	atomic_t irq_latched;	/* sensor pulses its IRQ line; keep it sticky */
 	wait_queue_head_t waitq;
 	struct mutex lock;
 
@@ -68,6 +69,7 @@ static irqreturn_t fingerprint_irq_thread(int irq, void *dev_id)
 {
 	struct fingerprint_data *fp = dev_id;
 
+	atomic_set(&fp->irq_latched, 1);
 	atomic_inc(&fp->irq_count);
 	wake_up_interruptible(&fp->waitq);
 	sysfs_notify(&fp->dev->kobj, NULL, "irq");
@@ -105,6 +107,7 @@ static __poll_t fingerprint_poll(struct file *file, struct poll_table_struct *wa
 
 	if (atomic_read(&fp->irq_count) > 0) {
 		atomic_set(&fp->irq_count, 0);
+	atomic_set(&fp->irq_latched, 0);
 		mask |= EPOLLIN | EPOLLRDNORM;
 	}
 
@@ -119,13 +122,20 @@ static long fingerprint_ioctl_internal(struct fingerprint_data *fp,
 
 	switch (cmd) {
 	case FP_IOC_CMD_ENABLE_IRQ:
+		/*
+		 * The vendor driver returns 1 here (mov w0, #1 right before the
+		 * ret) and its HAL treats anything else as "the interrupt is not
+		 * armed": fpc_ree_device_wait_irq() would then re-arm and poll
+		 * again every ~20ms forever, so identify/enroll never saw the
+		 * finger even though the sensor and its interrupt worked.
+		 */
 		mutex_lock(&fp->lock);
 		if (!fp->irq_enabled) {
 			enable_irq(fp->irq);
 			fp->irq_enabled = true;
 		}
 		mutex_unlock(&fp->lock);
-		return 0;
+		return 1;
 
 	case FP_IOC_CMD_DISABLE_IRQ:
 		mutex_lock(&fp->lock);
@@ -143,7 +153,15 @@ static long fingerprint_ioctl_internal(struct fingerprint_data *fp,
 		return 0;
 
 	case FP_IOC_CMD_GET_IRQ_STATUS:
-		val = gpiod_get_value(fp->gpiod_irq);
+		/*
+		 * The vendor HAL waits for a finger by polling this value.  The
+		 * sensor only pulses its IRQ line, so a plain level read almost
+		 * always returns 0; latch the interrupt until somebody reads it
+		 * and keep reporting a still-high level as well.
+		 */
+		val = atomic_xchg(&fp->irq_latched, 0);
+		if (fp->gpiod_irq && gpiod_get_value(fp->gpiod_irq) > 0)
+			val = 1;
 		if (copy_to_user((void __user *)arg, &val, sizeof(val)))
 			return -EFAULT;
 		return 0;
@@ -217,7 +235,10 @@ static ssize_t irq_show(struct device *dev, struct device_attribute *attr,
 			char *buf)
 {
 	struct fingerprint_data *fp = dev_get_drvdata(dev);
-	int val = gpiod_get_value(fp->gpiod_irq);
+	int val = atomic_xchg(&fp->irq_latched, 0);
+
+	if (fp->gpiod_irq && gpiod_get_value(fp->gpiod_irq) > 0)
+		val = 1;
 
 	return sysfs_emit(buf, "%d\n", val);
 }
@@ -374,6 +395,7 @@ static int fingerprint_probe(struct platform_device *pdev)
 	mutex_init(&fp->lock);
 	init_waitqueue_head(&fp->waitq);
 	atomic_set(&fp->irq_count, 0);
+	atomic_set(&fp->irq_latched, 0);
 	snprintf(fp->chip_info, sizeof(fp->chip_info), "ff--NN");
 	snprintf(fp->module_id, sizeof(fp->module_id), "%s", DEFAULT_MODULE_ID);
 
