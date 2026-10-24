@@ -19,6 +19,7 @@
 
 #include <linux/bitfield.h>
 #include <linux/clk.h>
+#include <linux/debugfs.h>
 #include <linux/delay.h>
 #include <linux/firmware.h>
 #include <linux/io.h>
@@ -31,6 +32,7 @@
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
+#include <linux/seq_file.h>
 
 /* USB misc ctrl (usb3otg_bc) */
 #define MISC_CFG00			0x00
@@ -188,6 +190,8 @@ struct kirin990_usb_phy {
 	u32 term;
 	bool term_valid;
 	bool sram_loaded;
+
+	struct dentry *debugfs;
 };
 
 static inline void misc_rmw(struct kirin990_usb_phy *p, u32 off, u32 clr, u32 set)
@@ -764,6 +768,73 @@ static void kirin990_usb_phy_parse(struct kirin990_usb_phy *p)
 	}
 }
 
+/*
+ * Read-only view of the Type-C Assist block.  The vendor driver never asks the
+ * TCA who is plugged in (it fakes "DP in, positive orientation" at boot), so
+ * this is the cheapest way to find out whether the TCPC part reports anything
+ * useful on this board: TCA_TCPC bit 4 = valid, bits 1:0 = mux, bit 2 = the
+ * plug is flipped, TCA_PSTATE = PIPE power state of the lanes.
+ */
+static int kirin990_tca_show(struct seq_file *s, void *unused)
+{
+	struct kirin990_usb_phy *p = s->private;
+	u32 sts, tcpc, v;
+	int i;
+
+	sts = readl(p->misc + TCA_INTR_STS);
+	tcpc = readl(p->misc + TCA_TCPC);
+
+	seq_printf(s, "misc_a0    %#010x\n", readl(p->misc + MISC_CFGA0));
+	seq_printf(s, "tca_sts    %#010x ack=%u timeout=%u\n", sts,
+		   !!(sts & TCA_INTR_XA_ACK), !!(sts & TCA_INTR_XA_TIMEOUT));
+	seq_printf(s, "tca_tcpc   %#010x valid=%u mux=%u flip=%u low_power=%u\n",
+		   tcpc, !!(tcpc & TCA_TCPC_VALID),
+		   (u32)FIELD_GET(TCA_TCPC_MUX, tcpc),
+		   !!(tcpc & TCA_TCPC_ORIENT_FLIP),
+		   !!(tcpc & TCA_TCPC_LOW_POWER_EN));
+	seq_printf(s, "tca_pstate %#010x\n", readl(p->misc + TCA_PSTATE));
+	seq_printf(s, "tca_cfg1   %#010x\n",
+		   readl(p->misc + TCA_CTRLSYNCMODE_CFG1));
+	seq_printf(s, "tca_dbg0   %#010x\n",
+		   readl(p->misc + TCA_CTRLSYNCMODE_DBG0));
+
+	v = readl(p->dp_ctrl + DP_CTRL_PHY_CFG6);
+	seq_printf(s, "dp_cfg6    %#010x sram_bypass=%u ext_ld_done=%u\n", v,
+		   !!(v & PHY_CFG6_SRAM_BYPASS),
+		   !!(v & PHY_CFG6_SRAM_EXT_LD_DONE));
+	v = readl(p->dp_ctrl + DP_CTRL_PHY_STAT0);
+	seq_printf(s, "dp_stat0   %#010x sram_init_done=%u\n", v,
+		   !!(v & PHY_STAT0_SRAM_INIT_DONE));
+
+	seq_puts(s, "tca_window");
+	for (i = 0; i < 0x40; i += 4)
+		seq_printf(s, " %03x=%08x", TCA_BASE + i,
+			   readl(p->misc + TCA_BASE + i));
+	seq_putc(s, '\n');
+
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(kirin990_tca);
+
+static void kirin990_usb_phy_debugfs_remove(void *data)
+{
+	struct kirin990_usb_phy *p = data;
+
+	debugfs_remove_recursive(p->debugfs);
+}
+
+static void kirin990_usb_phy_debugfs_init(struct kirin990_usb_phy *p)
+{
+	p->debugfs = debugfs_create_dir("kirin990-usb3", NULL);
+	if (IS_ERR_OR_NULL(p->debugfs)) {
+		p->debugfs = NULL;
+		return;
+	}
+
+	debugfs_create_file("tca", 0444, p->debugfs, p, &kirin990_tca_fops);
+	devm_add_action_or_reset(p->dev, kirin990_usb_phy_debugfs_remove, p);
+}
+
 static int kirin990_usb_phy_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -818,6 +889,8 @@ static int kirin990_usb_phy_probe(struct platform_device *pdev)
 	if (IS_ERR(phy))
 		return PTR_ERR(phy);
 	phy_set_drvdata(phy, p);
+
+	kirin990_usb_phy_debugfs_init(p);
 
 	provider = devm_of_phy_provider_register(dev, of_phy_simple_xlate);
 	return PTR_ERR_OR_ZERO(provider);
