@@ -464,7 +464,16 @@ static int fingerprint_probe(struct platform_device *pdev)
 			fp->irq, ret);
 		return ret;
 	}
-	fp->irq_enabled = true;
+	/*
+	 * The vendor driver keeps the interrupt disabled until its HAL asks for
+	 * it (irq_enabled reads 0 on an idle UOS system).  Leaving it enabled
+	 * makes the sensor's line storm - thousands of interrupts per minute -
+	 * and the HAL's wait-for-finger poll() then reports "event" instantly
+	 * while the TA's check_irq_status still sees no finger, so identify and
+	 * enroll spin forever instead of waiting for a touch.
+	 */
+	disable_irq(fp->irq);
+	fp->irq_enabled = false;
 
 	ret = alloc_chrdev_region(&fp->devno, 0, 1, DRIVER_NAME);
 	if (ret) {
