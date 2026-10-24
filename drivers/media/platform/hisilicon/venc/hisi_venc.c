@@ -26,6 +26,25 @@ static unsigned int clk_level = 1;
 module_param(clk_level, uint, 0644);
 MODULE_PARM_DESC(clk_level, "encoder clock: 0 = 640 MHz, 1 = 480 MHz, 2 = 332 MHz, 3 = 207.5 MHz");
 
+/*
+ * The encoder is still bring-up only: the VEDU needs a large register set and
+ * internal work buffers (PMV, QPG, NBI, PME and the rec headers) that this
+ * driver does not program yet.  Starting it faults in the SMMU and the
+ * asynchronous SError panics the machine, so refuse to encode unless asked.
+ */
+static bool bringup;
+module_param(bringup, bool, 0644);
+MODULE_PARM_DESC(bringup, "allow starting the encoder (bring-up only, can panic the machine)");
+
+/* bring-up bisect: skip the VEDU register programming / the start kick */
+static bool skip_regs;
+module_param(skip_regs, bool, 0644);
+MODULE_PARM_DESC(skip_regs, "do not program the VEDU core registers");
+
+static bool no_start;
+module_param(no_start, bool, 0644);
+MODULE_PARM_DESC(no_start, "program the VEDU but do not kick it");
+
 /* ------------------------------------------------------------------ formats */
 
 static const u32 hivenc_raw_fmts[] = {
@@ -271,10 +290,30 @@ static void hivenc_device_run(void *priv)
 		return;
 	}
 
+	if (!bringup) {
+		dev_warn_once(venc->dev,
+			      "hisi-venc is bring-up only, refusing to encode (bringup=1 to override)\n");
+		mutex_unlock(&venc->hw_lock);
+		v4l2_m2m_buf_done(src_buf, VB2_BUF_STATE_ERROR);
+		v4l2_m2m_buf_done(dst_buf, VB2_BUF_STATE_ERROR);
+		v4l2_m2m_job_finish(venc->m2m_dev, ctx->fh.m2m_ctx);
+		return;
+	}
+
 	ret = pm_runtime_resume_and_get(venc->dev);
 	if (ret < 0) {
 		v4l2_m2m_job_finish(venc->m2m_dev, ctx->fh.m2m_ctx);
 		mutex_unlock(&venc->hw_lock);
+		return;
+	}
+
+	if (skip_regs) {
+		dev_warn(venc->dev, "skip_regs: powered on and SMMU programmed only\n");
+		mutex_unlock(&venc->hw_lock);
+		v4l2_m2m_buf_done(src_buf, VB2_BUF_STATE_ERROR);
+		v4l2_m2m_buf_done(dst_buf, VB2_BUF_STATE_ERROR);
+		v4l2_m2m_job_finish(venc->m2m_dev, ctx->fh.m2m_ctx);
+		pm_runtime_put_autosuspend(venc->dev);
 		return;
 	}
 
@@ -368,6 +407,18 @@ static void hivenc_device_run(void *priv)
 		hivenc_h264_setup_frame(ctx, is_idr);
 	else
 		hivenc_hevc_setup_frame(ctx, is_idr);
+
+	if (no_start) {
+		dev_warn(venc->dev, "no_start: VEDU programmed but not started\n");
+		hivenc_mmu_unmap(venc, &src_map);
+		hivenc_mmu_unmap(venc, &dst_map);
+		mutex_unlock(&venc->hw_lock);
+		v4l2_m2m_buf_done(src_buf, VB2_BUF_STATE_ERROR);
+		v4l2_m2m_buf_done(dst_buf, VB2_BUF_STATE_ERROR);
+		v4l2_m2m_job_finish(venc->m2m_dev, ctx->fh.m2m_ctx);
+		pm_runtime_put_autosuspend(venc->dev);
+		return;
+	}
 
 	/* Launch encode */
 	schedule_delayed_work(&venc->watchdog_work, msecs_to_jiffies(500));

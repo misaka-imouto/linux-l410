@@ -87,20 +87,30 @@
 #define MMU_PRE_STRMADDR0_STR		0x80d0
 #define MMU_PRE_STRMADDR0_END		0x80d4
 
-/* SMMU Registers (shared architecture with VDEC) */
-#define SMMU_MSTR_BASE			0x10000
-#define SMMU_MSTR_SMRX(n)		(SMMU_MSTR_BASE + 0x100 + 4 * (n))
-
+/*
+ * SMMU registers, from the vendor venc_hivna/drv/product/HiVCodecV500/smmu.c and
+ * smmu_regs.h: common block at +0x20000, master block at +0x1A000.
+ */
 #define SMMU_COMMON_BASE		0x20000
 #define SMMU_SCR			(SMMU_COMMON_BASE + 0x000)
+#define SMMU_INTMASK_NS			(SMMU_COMMON_BASE + 0x010)
 #define SMMU_INTSTAT_NS			(SMMU_COMMON_BASE + 0x018)
+#define SMMU_INTCLR_NS			(SMMU_COMMON_BASE + 0x01c)
 #define SMMU_SMRX_NS(n)			(SMMU_COMMON_BASE + 0x020 + 4 * (n))
 #define SMMU_CB_TTBR0			(SMMU_COMMON_BASE + 0x204)
+#define SMMU_CB_TTBR1			(SMMU_COMMON_BASE + 0x208)
 #define SMMU_CB_TTBCR			(SMMU_COMMON_BASE + 0x20c)
 #define SMMU_CB_TTBR_MSB		(SMMU_COMMON_BASE + 0x224)
 #define SMMU_ERR_ADDR_MSB_NS		(SMMU_COMMON_BASE + 0x300)
 #define SMMU_ERR_RDADDR_NS		(SMMU_COMMON_BASE + 0x304)
 #define SMMU_ERR_WRADDR_NS		(SMMU_COMMON_BASE + 0x308)
+
+#define SMMU_MSTR_BASE			0x1a000
+#define SMMU_MSTR_GLB_BYPASS		(SMMU_MSTR_BASE + 0x000)
+#define SMMU_MSTR_SMRX_0(n)		(SMMU_MSTR_BASE + 0x100 + 4 * (n))
+#define SMMU_MSTR_SMRX_1(n)		(SMMU_MSTR_BASE + 0x260 + 4 * (n))
+#define SMMU_MSTR_SMRX_2(n)		(SMMU_MSTR_BASE + 0x3c0 + 4 * (n))
+#define SMMU_MSTR_SMR_NUM		37
 
 /* Bit definitions for VEDU_VCPI_START */
 #define VCPI_START_VSTART		BIT(0)

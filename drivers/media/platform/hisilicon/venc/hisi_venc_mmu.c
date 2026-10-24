@@ -119,34 +119,76 @@ void hivenc_mmu_fini(struct hivenc_dev *venc)
 	free_io_pgtable_ops(mmu->ops);
 }
 
+/* read-modify-write a bit field, like the vendor set_common_reg() */
+static void hivenc_smmu_set(struct hivenc_dev *venc, u32 reg, u32 val,
+			    u32 bits, u32 shift)
+{
+	u32 mask = (bits >= 32) ? ~0U : ((1U << bits) - 1);
+	u32 tmp = vedu_read(venc, reg);
+
+	tmp &= ~(mask << shift);
+	vedu_write(venc, reg, tmp | ((val & mask) << shift));
+}
+
+/*
+ * Bring up the encoder's private SMMU the way the vendor driver does
+ * (venc_hivna/drv/product/HiVCodecV500/smmu.c, venc_smmu_init()).
+ *
+ * Order matters: the master windows and the common stream-match registers are
+ * programmed first and the global bypass is only switched off at the end.  The
+ * old sequence cleared the bypass first, i.e. switched translation on before
+ * the SMMU had any windows or stream matches configured.
+ */
 void hivenc_mmu_hw_setup(struct hivenc_dev *venc)
 {
 	struct hivenc_mmu *mmu = &venc->mmu;
 	u64 ttbr = mmu->cfg.arm_lpae_s1_cfg.ttbr;
-	u32 scr;
+	static const struct {
+		u8 idx, upwin, len;
+	} win[] = {
+		{ 0, 0x41, 0x14 },	/* refld luma */
+		{ 1, 0x17, 0x0a },	/* refld chroma */
+		{ 13, 0x00, 0x40 },	/* curld y */
+		{ 14, 0x00, 0x10 },	/* curld u */
+		{ 15, 0x00, 0x04 },	/* curld v */
+		{ 21, 0x05, 0x01 },	/* pme ld */
+		{ 22, 0x00, 0x17 },	/* rec st luma */
+		{ 23, 0x00, 0x0d },	/* rec st chroma */
+		{ 35, 0x01, 0x01 },	/* rec st luma header */
+		{ 36, 0x01, 0x01 },	/* rec st chroma header */
+	};
+	u32 reg;
 	int i;
 
-	scr = vedu_read(venc, SMMU_SCR);
-	scr &= ~BIT(0);			/* global bypass off */
-	scr |= BIT(1) | BIT(2);		/* rqos_en, wqos_en */
-	vedu_write(venc, SMMU_SCR, scr);
+	/* master ports: global bypass off, default window len = 1, upwin = 0 */
+	vedu_write(venc, SMMU_MSTR_GLB_BYPASS, 0);
+	for (i = 0; i < SMMU_MSTR_SMR_NUM; i++) {
+		vedu_write(venc, SMMU_MSTR_SMRX_0(i), 0x1000);
+		hivenc_smmu_set(venc, SMMU_SMRX_NS(i), 0xbc, 32, 0);
+	}
 
-	/* Stream matching */
-	for (i = 0; i < 32; i++)
-		vedu_write(venc, SMMU_SMRX_NS(i), (i & 1) ? 0x1d : 0x1c);
+	for (i = 0; i < ARRAY_SIZE(win); i++) {
+		reg = SMMU_MSTR_SMRX_0(win[i].idx);
+		hivenc_smmu_set(venc, reg, win[i].upwin, 8, 4);
+		hivenc_smmu_set(venc, reg, win[i].len, 8, 12);
+	}
 
 	vedu_write(venc, SMMU_CB_TTBR0, lower_32_bits(ttbr));
 	vedu_write(venc, SMMU_CB_TTBR_MSB, upper_32_bits(ttbr) & 0xffff);
-	vedu_write(venc, SMMU_CB_TTBCR, vedu_read(venc, SMMU_CB_TTBCR) | BIT(0));
 
-	vedu_write(venc, SMMU_ERR_RDADDR_NS, lower_32_bits(mmu->err_rd.dma));
-	vedu_write(venc, SMMU_ERR_WRADDR_NS, lower_32_bits(mmu->err_wr.dma));
-	vedu_write(venc, SMMU_ERR_ADDR_MSB_NS,
-		   (upper_32_bits(mmu->err_rd.dma) & 0xffff) |
-		   ((upper_32_bits(mmu->err_wr.dma) & 0xffff) << 16));
+	/* switch translation on, then the context bank and the fault pages */
+	hivenc_smmu_set(venc, SMMU_SCR, 0, 1, 0);
+	hivenc_smmu_set(venc, SMMU_INTCLR_NS, 0x3f, 32, 0);
+	hivenc_smmu_set(venc, SMMU_CB_TTBCR, 1, 1, 0);
 
-	for (i = 0; i < 4; i++)
-		vedu_write(venc, SMMU_MSTR_SMRX(i), 0);
+	hivenc_smmu_set(venc, SMMU_ERR_RDADDR_NS,
+			lower_32_bits(mmu->err_rd.dma), 32, 0);
+	hivenc_smmu_set(venc, SMMU_ERR_WRADDR_NS,
+			lower_32_bits(mmu->err_wr.dma), 32, 0);
+	hivenc_smmu_set(venc, SMMU_ERR_ADDR_MSB_NS,
+			upper_32_bits(mmu->err_rd.dma) & 0xffff, 16, 0);
+	hivenc_smmu_set(venc, SMMU_ERR_ADDR_MSB_NS,
+			upper_32_bits(mmu->err_wr.dma) & 0xffff, 16, 16);
 }
 
 void hivenc_mmu_powered_off(struct hivenc_dev *venc)
