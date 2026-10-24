@@ -329,7 +329,33 @@ static ssize_t module_id_show(struct device *dev,
 
 	return sysfs_emit(buf, "%s\n", fp->module_id);
 }
-static DEVICE_ATTR_RO(module_id);
+
+/*
+ * The vendor daemon writes the module id it read from the TA here after every
+ * fpc_module_open(); on the vendor driver the attribute is rw.  Keep it
+ * writable (and remember the value) so the HAL does not log
+ * "module_id_node_write failed -5" on every start.
+ */
+static ssize_t module_id_store(struct device *dev,
+			       struct device_attribute *attr, const char *buf,
+			       size_t count)
+{
+	struct fingerprint_data *fp = dev_get_drvdata(dev);
+	size_t len = count;
+
+	if (len && buf[len - 1] == '\n')
+		len--;
+	if (len >= sizeof(fp->module_id))
+		len = sizeof(fp->module_id) - 1;
+
+	mutex_lock(&fp->lock);
+	memcpy(fp->module_id, buf, len);
+	fp->module_id[len] = '\0';
+	mutex_unlock(&fp->lock);
+
+	return count;
+}
+static DEVICE_ATTR_RW(module_id);
 
 static ssize_t nav_show(struct device *dev, struct device_attribute *attr,
 			char *buf)
