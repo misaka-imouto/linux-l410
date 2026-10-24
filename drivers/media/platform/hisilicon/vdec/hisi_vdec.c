@@ -749,10 +749,31 @@ static void hivdec_queue_cleanup(struct vb2_queue *vq, u32 state)
 	}
 }
 
+static int hivdec_soft_reset(struct hivdec_dev *vdec, u32 mask);
+
+/* the hardware may still be decoding into the buffers about to go away */
+static void hivdec_quiesce(struct hivdec_ctx *ctx)
+{
+	struct hivdec_dev *vdec = ctx->dev;
+
+	if (!READ_ONCE(ctx->job_active))
+		return;
+	if (wait_event_timeout(vdec->job_wq, !READ_ONCE(ctx->job_active),
+			       msecs_to_jiffies(3000)))
+		return;
+	/* the 2 s hardware watchdog should have fired; reset as a last resort */
+	dev_warn(vdec->dev, "decoder still busy at streamoff, resetting\n");
+	if (!pm_runtime_resume_and_get(vdec->dev)) {
+		hivdec_soft_reset(vdec, RST_MFDE);
+		pm_runtime_put_autosuspend(vdec->dev);
+	}
+}
+
 static void hivdec_stop_streaming(struct vb2_queue *q)
 {
 	struct hivdec_ctx *ctx = vb2_get_drv_priv(q);
 
+	hivdec_quiesce(ctx);
 	if (V4L2_TYPE_IS_OUTPUT(q->type) && ctx->coded_fmt_desc->ops->stop)
 		ctx->coded_fmt_desc->ops->stop(ctx);
 	hivdec_queue_cleanup(q, VB2_BUF_STATE_ERROR);
