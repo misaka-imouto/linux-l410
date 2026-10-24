@@ -163,6 +163,16 @@ static long fingerprint_ioctl_internal(struct fingerprint_data *fp,
 
 	case FP_IOC_CMD_GET_DEVICE_INFO:
 		memset(&dev_info, 0, sizeof(dev_info));
+		/*
+		 * These are the "custom" pin numbers the TA's secure-GPIO
+		 * driver uses (bank * 8 + line: 35 * 8 + 1 = 281 for the
+		 * reset on fa8b7000, 29 * 8 + 2 = 234 for the IRQ on
+		 * fa8b1000), not the Linux global numbers (793/746).  The
+		 * fixup sets fingerprint,reset_gpio to 281; handing the TA
+		 * the stale 199 from the firmware tree made its sensor
+		 * bring-up fail ("not find the spi num", Product_id=255) and
+		 * every later operation returned -99.
+		 */
 		dev_info.reset_pin = fp->reset_gpio;
 		dev_info.irq_pin = fp->irq_gpio;
 		dev_info.spi_cs = fp->cs_gpio;

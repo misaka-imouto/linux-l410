@@ -1431,9 +1431,27 @@ int smc_shadow_exit(pid_t ca)
 	return proc_smc_wakeup_ca(ca, SHADOW_EXIT_RUN);
 }
 
+/*
+ * The TEE asks the NS side to start a "FIQ shadow" thread for a given TCB
+ * (SMC_OPS_START_FIQSHD).  With ipihelper actually running now this path is
+ * live, and a request with target == 0 (the "missed notification" case, where
+ * the notify entry could not be read) used to be forwarded as well, handing
+ * the TEE a bogus TCB.  Log the target and skip the empty ones.
+ */
+static bool g_fiq_shadow = true;
+module_param_named(fiq_shadow, g_fiq_shadow, bool, 0644);
+MODULE_PARM_DESC(fiq_shadow, "forward TEE FIQ-shadow requests to SMC (default on)");
+
 void fiq_shadow_work_func(uint64_t target)
 {
 	struct smc_cmd_ret secret = { SMC_EXIT_MAX, 0, target };
+
+	tlogi("FIQSHD target=0x%llx\n", (unsigned long long)target);
+	if (!g_fiq_shadow || target == 0) {
+		tlogd("skip FIQSHD (enabled=%d target=0x%llx)\n",
+		      g_fiq_shadow, (unsigned long long)target);
+		return;
+	}
 	tee_trace_add_event(INTERRUPT_HANDLE_SPI_REE_SCHEDULED, target);
 	secs_suspend_status(target);
 	if (power_on_cc() != 0) {

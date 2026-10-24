@@ -58,5 +58,11 @@
 &{/fingerprint} {
 	reset-gpios = <&{/amba/gpio@fa8b7000} 1 1>;	// GPIO 281, active low
 	irq-gpios = <&{/amba/gpio@fa8b1000} 2 0>;	// GPIO 234, active high
+	// The TA's secure-GPIO driver works on the vendor's "custom" numbering
+	// (bank * 8 + line), which the fingerprint HAL passes through
+	// FP_IOC_CMD_GET_DEVICE_INFO.  The firmware tree still carries a stale
+	// 199 here; the real reset line (gpio35 line 1) is 281.
+	fingerprint,reset_gpio = <281>;
+	fingerprint,irq_gpio = <234>;
 };
 
