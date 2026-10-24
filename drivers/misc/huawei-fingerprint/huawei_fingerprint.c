@@ -56,6 +56,7 @@ struct fingerprint_data {
 	bool irq_enabled;
 	atomic_t irq_count;
 	atomic_t irq_latched;	/* sensor pulses its IRQ line; keep it sticky */
+	atomic64_t irq_total;	/* diagnostics: handler invocations */
 	wait_queue_head_t waitq;
 	struct mutex lock;
 
@@ -71,6 +72,7 @@ static irqreturn_t fingerprint_irq_thread(int irq, void *dev_id)
 
 	atomic_set(&fp->irq_latched, 1);
 	atomic_inc(&fp->irq_count);
+	atomic64_inc(&fp->irq_total);
 	wake_up_interruptible(&fp->waitq);
 	sysfs_notify(&fp->dev->kobj, NULL, "irq");
 
@@ -240,11 +242,25 @@ static const struct file_operations fingerprint_fops = {
 	.compat_ioctl   = fingerprint_compat_ioctl,
 };
 
+/*
+ * The vendor HAL reads this attribute to decide whether the sensor asserted
+ * its interrupt line: it calls ENABLE_IRQ, opens/reads "irq", and only when
+ * the value is 0 does it poll(POLLPRI) for sysfs_notify() from our handler.
+ *
+ * So this must be the *live line level*, exactly like the vendor driver: the
+ * sensor pulses its line once for every "switch to finger-detect" command,
+ * and the HAL arms the interrupt before polling, so that pulse is usually
+ * taken while the line is masked and only delivered after enable_irq().  If
+ * the latched edge is reported here, the HAL thinks a finger is down, asks
+ * the TA for the irq status (still no finger -> error 6), disarms and re-arms
+ * - measured as exactly one fpc_tac_finger_detect per interrupt, ~47 per
+ * second, forever, instead of one arm and then a blocked poll.
+ */
 static ssize_t irq_show(struct device *dev, struct device_attribute *attr,
 			char *buf)
 {
 	struct fingerprint_data *fp = dev_get_drvdata(dev);
-	int val = atomic_xchg(&fp->irq_latched, 0);
+	int val = 0;
 
 	if (fp->gpiod_irq && gpiod_get_value(fp->gpiod_irq) > 0)
 		val = 1;
@@ -252,6 +268,17 @@ static ssize_t irq_show(struct device *dev, struct device_attribute *attr,
 	return sysfs_emit(buf, "%d\n", val);
 }
 static DEVICE_ATTR_RO(irq);
+
+/* Read-only, never clears: useful to see whether the sensor is poking us. */
+static ssize_t irq_count_show(struct device *dev,
+			      struct device_attribute *attr, char *buf)
+{
+	struct fingerprint_data *fp = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%llu\n",
+			  (unsigned long long)atomic64_read(&fp->irq_total));
+}
+static DEVICE_ATTR_RO(irq_count);
 
 static ssize_t irq_enabled_show(struct device *dev,
 				struct device_attribute *attr, char *buf)
@@ -341,6 +368,7 @@ static DEVICE_ATTR_RO(test_power_en);
 
 static struct attribute *fingerprint_attrs[] = {
 	&dev_attr_irq.attr,
+	&dev_attr_irq_count.attr,
 	&dev_attr_irq_enabled.attr,
 	&dev_attr_fingerprint_chip_info.attr,
 	&dev_attr_module_id.attr,
@@ -405,6 +433,7 @@ static int fingerprint_probe(struct platform_device *pdev)
 	init_waitqueue_head(&fp->waitq);
 	atomic_set(&fp->irq_count, 0);
 	atomic_set(&fp->irq_latched, 0);
+	atomic64_set(&fp->irq_total, 0);
 	snprintf(fp->chip_info, sizeof(fp->chip_info), "ff--NN");
 	snprintf(fp->module_id, sizeof(fp->module_id), "%s", DEFAULT_MODULE_ID);
 
