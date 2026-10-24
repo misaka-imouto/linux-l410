@@ -290,16 +290,6 @@ static void hivenc_device_run(void *priv)
 		return;
 	}
 
-	if (!bringup) {
-		dev_warn_once(venc->dev,
-			      "hisi-venc is bring-up only, refusing to encode (bringup=1 to override)\n");
-		mutex_unlock(&venc->hw_lock);
-		v4l2_m2m_buf_done(src_buf, VB2_BUF_STATE_ERROR);
-		v4l2_m2m_buf_done(dst_buf, VB2_BUF_STATE_ERROR);
-		v4l2_m2m_job_finish(venc->m2m_dev, ctx->fh.m2m_ctx);
-		return;
-	}
-
 	ret = pm_runtime_resume_and_get(venc->dev);
 	if (ret < 0) {
 		v4l2_m2m_job_finish(venc->m2m_dev, ctx->fh.m2m_ctx);
@@ -309,11 +299,8 @@ static void hivenc_device_run(void *priv)
 
 	if (skip_regs) {
 		dev_warn(venc->dev, "skip_regs: powered on and SMMU programmed only\n");
+		schedule_delayed_work(&venc->watchdog_work, msecs_to_jiffies(500));
 		mutex_unlock(&venc->hw_lock);
-		v4l2_m2m_buf_done(src_buf, VB2_BUF_STATE_ERROR);
-		v4l2_m2m_buf_done(dst_buf, VB2_BUF_STATE_ERROR);
-		v4l2_m2m_job_finish(venc->m2m_dev, ctx->fh.m2m_ctx);
-		pm_runtime_put_autosuspend(venc->dev);
 		return;
 	}
 
@@ -412,11 +399,8 @@ static void hivenc_device_run(void *priv)
 		dev_warn(venc->dev, "no_start: VEDU programmed but not started\n");
 		hivenc_mmu_unmap(venc, &src_map);
 		hivenc_mmu_unmap(venc, &dst_map);
+		schedule_delayed_work(&venc->watchdog_work, msecs_to_jiffies(500));
 		mutex_unlock(&venc->hw_lock);
-		v4l2_m2m_buf_done(src_buf, VB2_BUF_STATE_ERROR);
-		v4l2_m2m_buf_done(dst_buf, VB2_BUF_STATE_ERROR);
-		v4l2_m2m_job_finish(venc->m2m_dev, ctx->fh.m2m_ctx);
-		pm_runtime_put_autosuspend(venc->dev);
 		return;
 	}
 
@@ -481,6 +465,12 @@ static void hivenc_buf_queue(struct vb2_buffer *vb)
 static int hivenc_start_streaming(struct vb2_queue *vq, unsigned int count)
 {
 	struct hivenc_ctx *ctx = vb2_get_drv_priv(vq);
+
+	if (!bringup) {
+		dev_warn_once(ctx->dev->dev,
+			      "hisi-venc is bring-up only, refusing to stream (bringup=1 to override)\n");
+		return -EIO;
+	}
 
 	if (V4L2_TYPE_IS_OUTPUT(vq->type)) {
 		ctx->frame_count = 0;
