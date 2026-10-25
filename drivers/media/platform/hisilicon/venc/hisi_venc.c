@@ -42,6 +42,10 @@ static uint reg_shift;
 module_param(reg_shift, uint, 0644);
 MODULE_PARM_DESC(reg_shift, "byte offset added to VEDU core register writes");
 
+static uint qos_cfg;
+module_param(qos_cfg, uint, 0644);
+MODULE_PARM_DESC(qos_cfg, "program the VENC bus QoS registers on power on (hard-resets this board)");
+
 static uint core_sel;
 module_param(core_sel, uint, 0644);
 MODULE_PARM_DESC(core_sel, "VEDU core to drive (0 or 1)");
@@ -227,6 +231,39 @@ static const struct {
 
 /* ------------------------------------------------------------------ power */
 
+/*
+ * The vendor driver programs the VENC QoS/bandwidth registers at power on
+ * (VENC_QOS_CFG): mode from the DT's venc_qos_mode, then bandwidth,
+ * saturation and extended control.  Without them the VEDU's AXI traffic can
+ * be left without bus credits.
+ */
+#define VENC_QOS_BASE		0xE8940000
+#define VENC_QOS_MODE		0x0c
+#define VENC_QOS_BANDWIDTH	0x10
+#define VENC_QOS_SATURATION	0x14
+#define VENC_QOS_EXTCONTROL	0x18
+
+static void hivenc_config_qos(struct hivenc_dev *venc)
+{
+	void __iomem *qos;
+
+	if (!qos_cfg)
+		return;
+
+	qos = ioremap(VENC_QOS_BASE, 0x20);
+	if (!qos) {
+		dev_warn(venc->dev, "cannot map the VENC QoS registers\n");
+		return;
+	}
+	writel(venc->qos_mode, qos + VENC_QOS_MODE);
+	writel(0x1000, qos + VENC_QOS_BANDWIDTH);
+	writel(0x20, qos + VENC_QOS_SATURATION);
+	writel(0x1, qos + VENC_QOS_EXTCONTROL);
+	iounmap(qos);
+
+	dev_info(venc->dev, "VENC QoS mode %u programmed\n", venc->qos_mode);
+}
+
 static int hivenc_power_on(struct hivenc_dev *venc)
 {
 	unsigned int level = min(clk_level, 3U);
@@ -279,6 +316,7 @@ static int hivenc_power_on(struct hivenc_dev *venc)
 
 	venc->powered = true;
 	hivenc_mmu_hw_setup(venc);
+	hivenc_config_qos(venc);
 
 	/* Clear and unmask interrupts */
 	vedu_write(venc, VEDU_VCPI_INTCLR, ~0U);
@@ -1335,6 +1373,9 @@ static int hivenc_probe(struct platform_device *pdev)
 	venc->clkfreq = devm_clk_get_optional(dev, "clk_vencfreq");
 	if (IS_ERR(venc->clkfreq))
 		venc->clkfreq = NULL;
+	venc->qos_mode = 2;
+	of_property_read_u32(dev->of_node, "venc_qos_mode", &venc->qos_mode);
+
 	venc->clk1 = devm_clk_get_optional(dev, "clk_venc1");
 	if (IS_ERR(venc->clk1))
 		venc->clk1 = NULL;

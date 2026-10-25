@@ -153,6 +153,7 @@ struct hivenc_dev {
 	struct regulator *venc1_supply;
 	struct regulator *media_supply;
 	u32 clk_rate[4];
+	u32 qos_mode;
 
 	int irq;
 	struct completion job_done;
