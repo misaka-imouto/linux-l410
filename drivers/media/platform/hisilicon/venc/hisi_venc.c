@@ -37,6 +37,11 @@ static bool bringup;
 module_param(bringup, bool, 0644);
 MODULE_PARM_DESC(bringup, "allow starting the encoder (bring-up only, can panic the machine)");
 
+/* bring-up: the EMUI10 register ABI may be shifted relative to our header */
+static uint reg_shift;
+module_param(reg_shift, uint, 0644);
+MODULE_PARM_DESC(reg_shift, "byte offset added to VEDU core register writes");
+
 /* bring-up bisect: skip the VEDU register programming / the start kick */
 static bool skip_regs;
 module_param(skip_regs, bool, 0644);
@@ -205,11 +210,24 @@ static irqreturn_t hivenc_irq(int irq, void *priv)
 	st = vedu_read(venc, VEDU_REG_FUNC_VCPI_INTSTAT);
 	raw = vedu_read(venc, VEDU_REG_FUNC_VCPI_RAWINT);
 	smmu = vedu_read(venc, SMMU_INTSTAT_NS);
-	mst = vedu_read(venc, SMMU_MSTR_DEBUG(0x44));
+	mst = vedu_read(venc, SMMU_MSTR_DEBUG(0x40));
+	{
+		static bool mstr_dumped;
+
+		if (!mstr_dumped && mst) {
+			int i;
+
+			mstr_dumped = true;
+			for (i = 0; i < 24; i++)
+				pr_info("hisi-venc mstr[%#04x] = %#x\n",
+					SMMU_MSTR_BASE + i * 4,
+					vedu_read(venc, SMMU_MSTR_BASE + i * 4));
+		}
+	}
 	if (!st && !raw && !smmu && !mst) {
 		dev_info_ratelimited(venc->dev,
-			"irq: nothing latched (intstat %#x raw %#x smmu %#x mstr %#x)\n",
-			st, raw, smmu, mst);
+			"irq: nothing latched (intstat %#x raw %#x smmu %#x mstr44 %#x)\n",
+			st, raw, smmu, vedu_read(venc, SMMU_MSTR_DEBUG(0x44)));
 		return IRQ_NONE;
 	}
 
@@ -462,6 +480,37 @@ static void hivenc_device_run(void *priv)
 		   (10 & 0x3f) | ((51 & 0x3f) << 8) | BIT(16));
 	vedu_write(venc, VEDU_REG_VEDU_VCPI_DBLKCFG, 0);
 
+	/*
+	 * No address register may stay at IOVA 0: the PME/NBI/QPG/REF masters
+	 * all issue transactions as soon as the VEDU starts, and an access to
+	 * IOVA 0 is what latches the SMMU master fault (0x1a040 = 0x1f) and
+	 * stalls the pipeline.
+	 */
+	hivenc_write64(venc, VEDU_REG_VEDU_VCPI_LLILD_ADDR_L, rec_y_iova);
+	hivenc_write64(venc, VEDU_REG_VEDU_VCPI_TUNLCELL_ADDR_L, rec_y_iova);
+	hivenc_write64(venc, VEDU_REG_VEDU_VCPI_YH_ADDR_L, rec_y_iova);
+	hivenc_write64(venc, VEDU_REG_VEDU_VCPI_CH_ADDR_L, rec_y_iova);
+	hivenc_write64(venc, VEDU_REG_VEDU_VCPI_REFY_L0_ADDR_L, rec_y_iova);
+	hivenc_write64(venc, VEDU_REG_VEDU_VCPI_REFC_L0_ADDR_L, rec_y_iova);
+	hivenc_write64(venc, VEDU_REG_VEDU_VCPI_REFYH_L0_ADDR_L, rec_y_iova);
+	hivenc_write64(venc, VEDU_REG_VEDU_VCPI_REFCH_L0_ADDR_L, rec_y_iova);
+	hivenc_write64(venc, VEDU_REG_VEDU_VCPI_REFY_L1_ADDR_L, rec_y_iova);
+	hivenc_write64(venc, VEDU_REG_VEDU_VCPI_REFC_L1_ADDR_L, rec_y_iova);
+	hivenc_write64(venc, VEDU_REG_VEDU_VCPI_REFYH_L1_ADDR_L, rec_y_iova);
+	hivenc_write64(venc, VEDU_REG_VEDU_VCPI_REFCH_L1_ADDR_L, rec_y_iova);
+	hivenc_write64(venc, VEDU_REG_VEDU_VCPI_PMELD_L0_ADDR_L, rec_y_iova);
+	hivenc_write64(venc, VEDU_REG_VEDU_VCPI_PMELD_L1_ADDR_L, rec_y_iova);
+	hivenc_write64(venc, VEDU_REG_VEDU_VCPI_PMEST_ADDR_L, rec_y_iova);
+	hivenc_write64(venc, VEDU_REG_VEDU_VCPI_NBI_MVST_ADDR_L, rec_y_iova);
+	hivenc_write64(venc, VEDU_REG_VEDU_VCPI_NBI_MVLD_ADDR_L, rec_y_iova);
+	hivenc_write64(venc, VEDU_REG_VEDU_VCPI_PMEINFO_ST_ADDR_L, rec_y_iova);
+	hivenc_write64(venc, VEDU_REG_VEDU_VCPI_PMEINFO_LD0_ADDR_L, rec_y_iova);
+	hivenc_write64(venc, VEDU_REG_VEDU_VCPI_PMEINFO_LD1_ADDR_L, rec_y_iova);
+	hivenc_write64(venc, VEDU_REG_VEDU_VCPI_QPGLD_INF_ADDR_L, rec_y_iova);
+	hivenc_write64(venc, VEDU_REG_VEDU_SKIPWEIGHT_LD_ADDR_L, rec_y_iova);
+	vedu_write(venc, VEDU_REG_VEDU_VCPI_PMEST_STRIDE, 0);
+	vedu_write(venc, VEDU_REG_VEDU_VCPI_PMELD_STRIDE, 0);
+
 	/* ring-buffer pointers: both at the start of the stream buffer */
 	hivenc_write64(venc, VEDU_REG_VEDU_VCPI_SWPTRADDR_L, strm_iova);
 	hivenc_write64(venc, VEDU_REG_VEDU_VCPI_SRPTRADDR_L, strm_iova);
@@ -469,12 +518,53 @@ static void hivenc_device_run(void *priv)
 	/* linear 8-bit stream format, CAVLC, single slice */
 	vedu_write(venc, VEDU_REG_VEDU_VCPI_STRFMT, 0);
 	vedu_write(venc, VEDU_REG_VEDU_VCPI_VLC_CONFIG, 0);
-	vedu_write(venc, VEDU_REG_VEDU_VLC_SLCHDRPARA, 0);
+	vedu_write(venc, VEDU_REG_VEDU_VLC_SLCHDRPARA, 1);
 	vedu_write(venc, VEDU_REG_VEDU_VLC_SLCHDRSTRM0, 0);
 	vedu_write(venc, VEDU_REG_VEDU_VLC_SLCHDRSTRM1, 0);
 	vedu_write(venc, VEDU_REG_VEDU_VCPI_MULTISLC, 0);
 	vedu_write(venc, VEDU_REG_VEDU_VCPI_TIMEOUT, 0x00ffffff);
 	vedu_write(venc, VEDU_REG_VEDU_VCPI_INTCLR, 0xffffffff);
+
+	if (reg_shift) {
+		u32 sh = reg_shift;
+		static const u32 internal[] = {
+			VEDU_REG_VEDU_VCPI_LLILD_ADDR_L,
+			VEDU_REG_VEDU_VCPI_TUNLCELL_ADDR_L,
+			VEDU_REG_VEDU_VCPI_YH_ADDR_L,
+			VEDU_REG_VEDU_VCPI_CH_ADDR_L,
+			VEDU_REG_VEDU_VCPI_PMELD_L0_ADDR_L,
+			VEDU_REG_VEDU_VCPI_PMEST_ADDR_L,
+			VEDU_REG_VEDU_VCPI_NBI_MVST_ADDR_L,
+			VEDU_REG_VEDU_VCPI_NBI_MVLD_ADDR_L,
+			VEDU_REG_VEDU_VCPI_PMEINFO_ST_ADDR_L,
+			VEDU_REG_VEDU_VCPI_QPGLD_INF_ADDR_L,
+		};
+		int i;
+
+		vedu_write(venc, VEDU_REG_VEDU_VCPI_MODE + sh,
+			   hivenc_vcpu_mode(ctx, is_idr));
+		vedu_write(venc, VEDU_REG_VEDU_VCPI_PICSIZE_PIX + sh,
+			   ((width - 1) & 0xffff) | (((height - 1) & 0xffff) << 16));
+		hivenc_write64(venc, VEDU_REG_VEDU_VCPI_SRC_YADDR_L + sh, src_y_iova);
+		hivenc_write64(venc, VEDU_REG_VEDU_VCPI_SRC_CADDR_L + sh, src_c_iova);
+		vedu_write(venc, VEDU_REG_VEDU_VCPI_STRIDE + sh,
+			   (y_stride & 0xffff) | ((y_stride & 0xffff) << 16));
+		hivenc_write64(venc, VEDU_REG_VEDU_VCPI_REC_YADDR_L + sh, rec_y_iova);
+		hivenc_write64(venc, VEDU_REG_VEDU_VCPI_REC_CADDR_L + sh, rec_c_iova);
+		hivenc_write64(venc, VEDU_REG_VEDU_VCPI_REC_YH_ADDR_L + sh, rec_y_iova);
+		hivenc_write64(venc, VEDU_REG_VEDU_VCPI_REC_CH_ADDR_L + sh, rec_c_iova);
+		vedu_write(venc, VEDU_REG_VEDU_VCPI_REC_STRIDE + sh,
+			   (rec_stride & 0xffff) | ((rec_stride & 0xffff) << 16));
+		hivenc_write64(venc, VEDU_REG_VEDU_VCPI_STRMADDR_L + sh, strm_iova);
+		vedu_write(venc, VEDU_REG_VEDU_VCPI_QPCFG + sh, (ctx->qp & 0x3f) << 10);
+		vedu_write(venc, VEDU_REG_VEDU_QPG_MAX_MIN_QP + sh,
+			   (10 & 0x3f) | ((51 & 0x3f) << 8) | BIT(16));
+		vedu_write(venc, VEDU_REG_VEDU_VCPI_STRFMT + sh, 0);
+		vedu_write(venc, VEDU_REG_VEDU_VCPI_TIMEOUT + sh, 0x00ffffff);
+		for (i = 0; i < (int)ARRAY_SIZE(internal); i++)
+			hivenc_write64(venc, internal[i] + sh, rec_y_iova);
+		dev_info(venc->dev, "reg_shift %#x applied\n", sh);
+	}
 
 	if (no_start) {
 		dev_warn(venc->dev, "no_start: VEDU programmed but not started\n");
@@ -484,9 +574,11 @@ static void hivenc_device_run(void *priv)
 	}
 
 	dev_info_ratelimited(venc->dev,
-		"start: mode %#x size %ux%u src %#llx rec %#llx strm %#llx\n",
+		"start: mode %#x size %ux%u src %#llx rec %#llx strm %#llx mstr40 %#x intstat %#x\n",
 		vedu_read(venc, VEDU_REG_VEDU_VCPI_MODE), width, height,
-		src_y_iova, rec_y_iova, strm_iova);
+		src_y_iova, rec_y_iova, strm_iova,
+		vedu_read(venc, SMMU_MSTR_DEBUG(0x40)),
+		vedu_read(venc, VEDU_REG_FUNC_VCPI_INTSTAT));
 	schedule_delayed_work(&venc->watchdog_work, msecs_to_jiffies(500));
 	vedu_write(venc, VEDU_REG_VEDU_VCPI_START, 0);
 	vedu_write(venc, VEDU_REG_VEDU_VCPI_START, 1);
