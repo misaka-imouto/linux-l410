@@ -144,8 +144,16 @@ static void hivenc_watchdog_func(struct work_struct *work)
 		return;
 	}
 
-	dev_err(venc->dev, "encoding timeout! status=%#x\n",
-		vedu_read(venc, FUNC_VCPI_RAWINT));
+	dev_err(venc->dev,
+		"encoding timeout! rawint=%#x intstat=%#x timer=%#x busy=%#x strm=%u smmu=%#x rd=%#x wr=%#x\n",
+		vedu_read(venc, VEDU_REG_FUNC_VCPI_RAWINT),
+		vedu_read(venc, VEDU_REG_FUNC_VCPI_INTSTAT),
+		vedu_read(venc, VEDU_REG_FUNC_VCPI_VEDU_TIMER),
+		vedu_read(venc, VEDU_REG_FUNC_VCPI_BUS_IDLE_FLAG),
+		vedu_read(venc, VEDU_REG_FUNC_VLC_PIC_STRMSIZE),
+		vedu_read(venc, SMMU_INTSTAT_NS),
+		vedu_read(venc, SMMU_ERR_RDADDR_NS),
+		vedu_read(venc, SMMU_ERR_WRADDR_NS));
 
 	/* Abort job */
 	src_buf = v4l2_m2m_src_buf_remove(ctx->fh.m2m_ctx);
@@ -159,6 +167,7 @@ static void hivenc_watchdog_func(struct work_struct *work)
 	vedu_write(venc, VEDU_VCPI_INTCLR, ~0U);
 	v4l2_m2m_job_finish(venc->m2m_dev, ctx->fh.m2m_ctx);
 	mutex_unlock(&venc->hw_lock);
+	pm_runtime_put_autosuspend(venc->dev);
 }
 
 /* ------------------------------------------------------------------ irq */
@@ -168,7 +177,7 @@ static irqreturn_t hivenc_irq(int irq, void *priv)
 	struct hivenc_dev *venc = priv;
 	u32 rawint;
 
-	rawint = vedu_read(venc, FUNC_VCPI_RAWINT);
+	rawint = vedu_read(venc, VEDU_REG_FUNC_VCPI_RAWINT);
 	if (!rawint)
 		return IRQ_NONE;
 
@@ -192,6 +201,7 @@ static irqreturn_t hivenc_irq_thread(int irq, void *priv)
 	ctx = v4l2_m2m_get_curr_priv(venc->m2m_dev);
 	if (!ctx) {
 		mutex_unlock(&venc->hw_lock);
+		pm_runtime_put_autosuspend(venc->dev);
 		return IRQ_HANDLED;
 	}
 
@@ -200,6 +210,7 @@ static irqreturn_t hivenc_irq_thread(int irq, void *priv)
 
 	if (!src_buf || !dst_buf) {
 		mutex_unlock(&venc->hw_lock);
+		pm_runtime_put_autosuspend(venc->dev);
 		return IRQ_HANDLED;
 	}
 
@@ -207,7 +218,7 @@ static irqreturn_t hivenc_irq_thread(int irq, void *priv)
 		u8 *dst_vaddr = vb2_plane_vaddr(&dst_buf->vb2_buf, 0);
 		size_t hdr_len = 0;
 
-		bytes_encoded = vedu_read(venc, FUNC_CABAC_PIC_STRMSIZE);
+		bytes_encoded = vedu_read(venc, VEDU_REG_FUNC_VLC_PIC_STRMSIZE);
 		venc->encoded_bytes = bytes_encoded;
 
 		is_idr = (ctx->frame_count == 0) || ctx->force_key_frame ||
@@ -257,23 +268,45 @@ static irqreturn_t hivenc_irq_thread(int irq, void *priv)
 
 	v4l2_m2m_job_finish(venc->m2m_dev, ctx->fh.m2m_ctx);
 	mutex_unlock(&venc->hw_lock);
+	pm_runtime_put_autosuspend(venc->dev);
 
 	return IRQ_HANDLED;
 }
 
 /* ------------------------------------------------------------------ m2m */
 
+static inline void hivenc_write64(struct hivenc_dev *venc, u32 off_l, u64 val)
+{
+	vedu_write(venc, off_l, lower_32_bits(val));
+	vedu_write(venc, off_l + 4, upper_32_bits(val));
+}
+
+/* MODE: protocol in bits 3:2, frame type 11:10, idr 16, entropy 12 */
+static u32 hivenc_vcpu_mode(struct hivenc_ctx *ctx, bool is_idr)
+{
+	u32 v = (1u << 2);		/* VEDU_H264 */
+	u32 ft = is_idr ? 0 : 1;	/* I / P */
+
+	if (ctx->proto == HIVENC_PROTO_HEVC)
+		v = 0;			/* VEDU_H265 */
+	v |= (ft & 3) << 10;
+	if (is_idr)
+		v |= BIT(16);
+	if (ctx->proto == HIVENC_PROTO_HEVC)
+		v |= BIT(6) | BIT(7);	/* sao luma/chroma */
+	return v;
+}
+
 static void hivenc_device_run(void *priv)
 {
 	struct hivenc_ctx *ctx = priv;
 	struct hivenc_dev *venc = ctx->dev;
 	struct vb2_v4l2_buffer *src_buf, *dst_buf;
-	struct hivenc_mapping src_map = { 0 }, dst_map = { 0 };
+	struct hivenc_src_buffer *sbuf;
+	struct hivenc_dst_buffer *dbuf;
 	u32 width = ctx->out_q.width;
 	u32 height = ctx->out_q.height;
 	u32 y_stride = ctx->out_q.bytesperline;
-	u32 c_stride = y_stride;
-	u32 y_size = y_stride * height;
 	u32 rec_stride = ALIGN(width, 64);
 	u32 rec_size = rec_stride * ALIGN(height, 16) * 3 / 2;
 	u64 src_y_iova, src_c_iova, strm_iova;
@@ -290,6 +323,8 @@ static void hivenc_device_run(void *priv)
 		mutex_unlock(&venc->hw_lock);
 		return;
 	}
+	sbuf = vb2_to_hivenc_src(&src_buf->vb2_buf);
+	dbuf = vb2_to_hivenc_dst(&dst_buf->vb2_buf);
 
 	ret = pm_runtime_resume_and_get(venc->dev);
 	if (ret < 0) {
@@ -305,122 +340,87 @@ static void hivenc_device_run(void *priv)
 		return;
 	}
 
-	/* Map source YUV frame into SMMU */
-	ret = hivenc_mmu_map_sgt(venc, vb2_dma_sg_plane_desc(&src_buf->vb2_buf, 0),
-				 ctx->out_q.sizeimage, &src_map);
-	if (ret)
-		goto err_pm;
-
-	/* Map destination bitstream buffer into SMMU */
-	ret = hivenc_mmu_map_sgt(venc, vb2_dma_sg_plane_desc(&dst_buf->vb2_buf, 0),
-				 ctx->cap_q.sizeimage, &dst_map);
-	if (ret)
-		goto err_unmap_src;
-
-	/* Allocate reconstructed buffers if not already done */
 	rec_idx = ctx->cur_rec_idx;
 	ref_idx = rec_idx ^ 1;
-
 	if (!ctx->rec_buf[0].vaddr) {
 		ret = hivenc_aux_alloc(venc, &ctx->rec_buf[0], rec_size);
 		if (ret)
-			goto err_unmap_dst;
+			goto err_pm;
 		ret = hivenc_aux_alloc(venc, &ctx->rec_buf[1], rec_size);
 		if (ret) {
 			hivenc_aux_free(venc, &ctx->rec_buf[0]);
-			goto err_unmap_dst;
+			goto err_pm;
 		}
 	}
 
-	src_y_iova = src_map.iova;
-	src_c_iova = src_y_iova + y_size;
-	strm_iova = dst_map.iova;
+	src_y_iova = sbuf->map.iova;
+	src_c_iova = src_y_iova + y_stride * height;
+	strm_iova = dbuf->map.iova;
 
-	rec_y_iova = ctx->rec_buf[rec_idx].dma;
+	rec_y_iova = ctx->rec_buf[rec_idx].map.iova;
 	rec_c_iova = rec_y_iova + rec_stride * ALIGN(height, 16);
 
 	if (ctx->has_ref) {
-		ref_y_iova = ctx->rec_buf[ref_idx].dma;
+		ref_y_iova = ctx->rec_buf[ref_idx].map.iova;
 		ref_c_iova = ref_y_iova + rec_stride * ALIGN(height, 16);
 	}
 
 	is_idr = (ctx->frame_count == 0) || ctx->force_key_frame ||
 		 ((ctx->gop_size > 0) && (ctx->frame_count % ctx->gop_size == 0));
 
-	/* Program hardware registers */
-	vedu_write(venc, VEDU_VCPI_MODE,
-		   hivenc_build_mode(ctx->proto,
-				     is_idr ? HIVENC_FTYPE_I : HIVENC_FTYPE_P,
-				     is_idr, true));
-	vedu_write(venc, VEDU_VCPI_PICSIZE_PIX, (width & 0xffff) | ((height & 0xffff) << 16));
+	/* real VEDU V500 offsets, see hisi_venc_regs.h */
+	vedu_write(venc, VEDU_REG_VEDU_VCPI_INTMASK, 0xcf);
+	vedu_write(venc, VEDU_REG_VEDU_VCPI_FRAMENO, ctx->frame_count);
+	vedu_write(venc, VEDU_REG_VEDU_VCPI_MODE, hivenc_vcpu_mode(ctx, is_idr));
+	vedu_write(venc, VEDU_REG_VEDU_VCPI_PICSIZE_PIX,
+		   ((width - 1) & 0xffff) | (((height - 1) & 0xffff) << 16));
 
-	/* Input source buffer */
-	vedu_write(venc, VEDU_VCPI_SRC_YADDR, lower_32_bits(src_y_iova));
-	vedu_write(venc, VEDU_VCPI_SRC_CADDR, lower_32_bits(src_c_iova));
-	vedu_write(venc, VEDU_VCPI_STRIDE, (y_stride & 0xffff) | ((c_stride & 0xffff) << 16));
+	hivenc_write64(venc, VEDU_REG_VEDU_VCPI_SRC_YADDR_L, src_y_iova);
+	hivenc_write64(venc, VEDU_REG_VEDU_VCPI_SRC_CADDR_L, src_c_iova);
+	vedu_write(venc, VEDU_REG_VEDU_VCPI_STRIDE,
+		   (y_stride & 0xffff) | ((y_stride & 0xffff) << 16));
 
-	/* Reconstructed target buffer */
-	vedu_write(venc, VEDU_VCPI_REC_YADDR, lower_32_bits(rec_y_iova));
-	vedu_write(venc, VEDU_VCPI_REC_CADDR, lower_32_bits(rec_c_iova));
-	vedu_write(venc, VEDU_VCPI_REC_STRIDE, (rec_stride & 0xffff) | ((rec_stride & 0xffff) << 16));
+	hivenc_write64(venc, VEDU_REG_VEDU_VCPI_REC_YADDR_L, rec_y_iova);
+	hivenc_write64(venc, VEDU_REG_VEDU_VCPI_REC_CADDR_L, rec_c_iova);
+	/* no HFBC: point the rec headers at the rec buffer for now */
+	hivenc_write64(venc, VEDU_REG_VEDU_VCPI_REC_YH_ADDR_L, rec_y_iova);
+	hivenc_write64(venc, VEDU_REG_VEDU_VCPI_REC_CH_ADDR_L, rec_c_iova);
+	vedu_write(venc, VEDU_REG_VEDU_VCPI_REC_STRIDE,
+		   (rec_stride & 0xffff) | ((rec_stride & 0xffff) << 16));
 
-	/* Reference source buffer (for P-frames) */
 	if (!is_idr && ctx->has_ref) {
-		vedu_write(venc, VEDU_VCPI_REFY_L0_ADDR, lower_32_bits(ref_y_iova));
-		vedu_write(venc, VEDU_VCPI_REFC_L0_ADDR, lower_32_bits(ref_c_iova));
-		vedu_write(venc, VEDU_VCPI_REF_L0_STRIDE, (rec_stride & 0xffff) | ((rec_stride & 0xffff) << 16));
-		vedu_write(venc, VEDU_VCPI_REF_FLAG, 1);
+		hivenc_write64(venc, VEDU_REG_VEDU_VCPI_REFY_L0_ADDR_L, ref_y_iova);
+		hivenc_write64(venc, VEDU_REG_VEDU_VCPI_REFC_L0_ADDR_L, ref_c_iova);
+		vedu_write(venc, VEDU_REG_VEDU_VCPI_REF_L0_STRIDE,
+			   (rec_stride & 0xffff) | ((rec_stride & 0xffff) << 16));
+		vedu_write(venc, VEDU_REG_VEDU_VCPI_REF_FLAG, 1);
 	} else {
-		vedu_write(venc, VEDU_VCPI_REF_FLAG, 0);
+		vedu_write(venc, VEDU_REG_VEDU_VCPI_REF_FLAG, 0);
 	}
 
-	/* Output stream buffer */
-	vedu_write(venc, VEDU_VCPI_STRMADDR, lower_32_bits(strm_iova));
-	vedu_write(venc, VEDU_VLCST_STRMADDR(0), lower_32_bits(strm_iova));
-	vedu_write(venc, VEDU_VLCST_STRMBUFLEN(0), ctx->cap_q.sizeimage);
+	vedu_write(venc, VEDU_REG_VEDU_PMV_POC_0, 0);
+	vedu_write(venc, VEDU_REG_VEDU_PMV_POC_1, 0);
 
-	/* Pre-MMU prefetch bounds */
-	vedu_write(venc, MMU_PRE_SRC_YADDR_STR, lower_32_bits(src_y_iova));
-	vedu_write(venc, MMU_PRE_SRC_YADDR_END, lower_32_bits(src_y_iova + ctx->out_q.sizeimage));
-	vedu_write(venc, MMU_PRE_STRMADDR0_STR, lower_32_bits(strm_iova));
-	vedu_write(venc, MMU_PRE_STRMADDR0_END, lower_32_bits(strm_iova + ctx->cap_q.sizeimage));
+	hivenc_write64(venc, VEDU_REG_VEDU_VCPI_STRMADDR_L, strm_iova);
+	vedu_write(venc, VEDU_REG_VEDU_VLCST_STRMBUFLEN, ctx->cap_q.sizeimage);
 
-	/* Quantization & QP */
-	vedu_write(venc, VEDU_VCPI_QPCFG, (ctx->qp & 0x3f) | 0x80);
-	vedu_write(venc, VEDU_QPG_MAX_MIN_QP, (10 & 0x3f) | ((51 & 0x3f) << 8));
-	vedu_write(venc, VEDU_VCPI_DBLKCFG, 0);
-
-	/* Codec specific setup */
-	if (ctx->proto == HIVENC_PROTO_H264)
-		hivenc_h264_setup_frame(ctx, is_idr);
-	else
-		hivenc_hevc_setup_frame(ctx, is_idr);
+	vedu_write(venc, VEDU_REG_VEDU_VCPI_QPCFG, (ctx->qp & 0x3f));
+	vedu_write(venc, VEDU_REG_VEDU_QPG_MAX_MIN_QP,
+		   (10 & 0x3f) | ((51 & 0x3f) << 8));
+	vedu_write(venc, VEDU_REG_VEDU_VCPI_DBLKCFG, 0);
 
 	if (no_start) {
 		dev_warn(venc->dev, "no_start: VEDU programmed but not started\n");
-		hivenc_mmu_unmap(venc, &src_map);
-		hivenc_mmu_unmap(venc, &dst_map);
 		schedule_delayed_work(&venc->watchdog_work, msecs_to_jiffies(500));
 		mutex_unlock(&venc->hw_lock);
 		return;
 	}
 
-	/* Launch encode */
 	schedule_delayed_work(&venc->watchdog_work, msecs_to_jiffies(500));
-	vedu_write(venc, VEDU_VCPI_START, VCPI_START_VSTART);
-
-	/* Temporary unmap mappings will be deferred */
-	hivenc_mmu_unmap(venc, &src_map);
-	hivenc_mmu_unmap(venc, &dst_map);
-
-	pm_runtime_put_autosuspend(venc->dev);
+	vedu_write(venc, VEDU_REG_VEDU_VCPI_START, 1);
 	mutex_unlock(&venc->hw_lock);
 	return;
 
-err_unmap_dst:
-	hivenc_mmu_unmap(venc, &dst_map);
-err_unmap_src:
-	hivenc_mmu_unmap(venc, &src_map);
 err_pm:
 	pm_runtime_put_autosuspend(venc->dev);
 	v4l2_m2m_job_finish(venc->m2m_dev, ctx->fh.m2m_ctx);
@@ -428,6 +428,47 @@ err_pm:
 }
 
 /* ------------------------------------------------------------------ vb2 */
+
+static int hivenc_buf_init(struct vb2_buffer *vb)
+{
+	struct hivenc_ctx *ctx = vb2_get_drv_priv(vb->vb2_queue);
+	struct sg_table *sgt = vb2_dma_sg_plane_desc(vb, 0);
+	struct hivenc_mapping *map;
+	bool *mapped;
+	int ret;
+
+	if (V4L2_TYPE_IS_OUTPUT(vb->vb2_queue->type)) {
+		map = &vb2_to_hivenc_src(vb)->map;
+		mapped = &vb2_to_hivenc_src(vb)->mapped;
+	} else {
+		map = &vb2_to_hivenc_dst(vb)->map;
+		mapped = &vb2_to_hivenc_dst(vb)->mapped;
+	}
+	ret = hivenc_mmu_map_sgt(ctx->dev, sgt, vb2_plane_size(vb, 0), map);
+	if (ret)
+		return ret;
+	*mapped = true;
+	return 0;
+}
+
+static void hivenc_buf_cleanup(struct vb2_buffer *vb)
+{
+	struct hivenc_ctx *ctx = vb2_get_drv_priv(vb->vb2_queue);
+
+	if (V4L2_TYPE_IS_OUTPUT(vb->vb2_queue->type)) {
+		struct hivenc_src_buffer *b = vb2_to_hivenc_src(vb);
+
+		if (b->mapped)
+			hivenc_mmu_unmap(ctx->dev, &b->map);
+		b->mapped = false;
+	} else {
+		struct hivenc_dst_buffer *b = vb2_to_hivenc_dst(vb);
+
+		if (b->mapped)
+			hivenc_mmu_unmap(ctx->dev, &b->map);
+		b->mapped = false;
+	}
+}
 
 static int hivenc_queue_setup(struct vb2_queue *vq,
 			      unsigned int *nbuffers, unsigned int *nplanes,
@@ -498,6 +539,8 @@ static void hivenc_stop_streaming(struct vb2_queue *vq)
 
 static const struct vb2_ops hivenc_qops = {
 	.queue_setup = hivenc_queue_setup,
+	.buf_init = hivenc_buf_init,
+	.buf_cleanup = hivenc_buf_cleanup,
 	.buf_prepare = hivenc_buf_prepare,
 	.buf_queue = hivenc_buf_queue,
 	.start_streaming = hivenc_start_streaming,
@@ -515,7 +558,7 @@ static int hivenc_queue_init(void *priv, struct vb2_queue *src_vq,
 	src_vq->type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
 	src_vq->io_modes = VB2_MMAP | VB2_DMABUF;
 	src_vq->drv_priv = ctx;
-	src_vq->buf_struct_size = sizeof(struct v4l2_m2m_buffer);
+	src_vq->buf_struct_size = sizeof(struct hivenc_src_buffer);
 	src_vq->ops = &hivenc_qops;
 	src_vq->mem_ops = &vb2_dma_sg_memops;
 	src_vq->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_COPY;
@@ -529,7 +572,7 @@ static int hivenc_queue_init(void *priv, struct vb2_queue *src_vq,
 	dst_vq->type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
 	dst_vq->io_modes = VB2_MMAP | VB2_DMABUF;
 	dst_vq->drv_priv = ctx;
-	dst_vq->buf_struct_size = sizeof(struct v4l2_m2m_buffer);
+	dst_vq->buf_struct_size = sizeof(struct hivenc_dst_buffer);
 	dst_vq->ops = &hivenc_qops;
 	dst_vq->mem_ops = &vb2_dma_sg_memops;
 	dst_vq->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_COPY;

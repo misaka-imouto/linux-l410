@@ -40,17 +40,29 @@ static const struct iommu_flush_ops hivenc_flush_ops = {
 int hivenc_aux_alloc(struct hivenc_dev *venc, struct hivenc_aux_buf *buf,
 		     size_t size)
 {
+	int ret;
+
 	buf->size = PAGE_ALIGN(size);
 	buf->vaddr = dma_alloc_coherent(venc->dev, buf->size, &buf->dma,
 					GFP_KERNEL);
 	if (!buf->vaddr)
 		return -ENOMEM;
+
+	ret = hivenc_mmu_map_phys(venc, buf->dma, buf->size, &buf->map);
+	if (ret) {
+		dma_free_coherent(venc->dev, buf->size, buf->vaddr, buf->dma);
+		buf->vaddr = NULL;
+		buf->dma = 0;
+		buf->size = 0;
+		return ret;
+	}
 	return 0;
 }
 
 void hivenc_aux_free(struct hivenc_dev *venc, struct hivenc_aux_buf *buf)
 {
 	if (buf->vaddr) {
+		hivenc_mmu_unmap(venc, &buf->map);
 		dma_free_coherent(venc->dev, buf->size, buf->vaddr, buf->dma);
 		buf->vaddr = NULL;
 		buf->dma = 0;
@@ -189,6 +201,9 @@ void hivenc_mmu_hw_setup(struct hivenc_dev *venc)
 			upper_32_bits(mmu->err_rd.dma) & 0xffff, 16, 0);
 	hivenc_smmu_set(venc, SMMU_ERR_ADDR_MSB_NS,
 			upper_32_bits(mmu->err_wr.dma) & 0xffff, 16, 16);
+
+	/* every master port may reach the whole IOVA pool */
+	hivenc_smmu_set_window(venc, 0, 0xfff80000);
 }
 
 void hivenc_mmu_powered_off(struct hivenc_dev *venc)
@@ -215,6 +230,68 @@ static void hivenc_unmap_range(struct io_pgtable_ops *ops, unsigned long iova,
 			break;
 		iova += n;
 		size -= n;
+	}
+}
+
+/* Map a physically contiguous range (dma_alloc_coherent output) once */
+int hivenc_mmu_map_phys(struct hivenc_dev *venc, phys_addr_t pa, size_t size,
+			struct hivenc_mapping *map)
+{
+	struct hivenc_mmu *mmu = &venc->mmu;
+	struct io_pgtable_ops *ops = mmu->ops;
+	unsigned long iova, cur;
+	size_t mapped_total = 0;
+	int ret = 0;
+
+	size = PAGE_ALIGN(size);
+	if (WARN_ON(!PAGE_ALIGNED(pa)))
+		return -EINVAL;
+
+	iova = gen_pool_alloc(mmu->iova_pool, size);
+	if (!iova)
+		return -ENOSPC;
+
+	mutex_lock(&mmu->lock);
+	cur = iova;
+	while (mapped_total < size) {
+		size_t mapped = 0;
+
+		ret = ops->map_pages(ops, cur, pa + mapped_total, SZ_4K,
+				     (size - mapped_total) / SZ_4K,
+				     IOMMU_READ | IOMMU_WRITE, GFP_KERNEL,
+				     &mapped);
+		if (ret || !mapped)
+			break;
+		cur += mapped;
+		mapped_total += mapped;
+	}
+	if (ret || mapped_total != size) {
+		hivenc_unmap_range(ops, iova, mapped_total);
+		gen_pool_free(mmu->iova_pool, iova, size);
+		mutex_unlock(&mmu->lock);
+		return ret ? ret : -EINVAL;
+	}
+	mutex_unlock(&mmu->lock);
+
+	map->iova = iova;
+	map->size = size;
+	return 0;
+}
+
+/*
+ * Window each master port accepts.  The vendor sets these to the range of the
+ * userspace buffers (venc_smmu_cfg, master_stream_start/end); we map every
+ * buffer out of one IOVA pool, so a single range covers them all.
+ */
+void hivenc_smmu_set_window(struct hivenc_dev *venc, u64 start, u64 end)
+{
+	u32 s = (start >> 15) & 0x1fffff;
+	u32 e = (end >> 15) & 0x1fffff;
+	int i;
+
+	for (i = 0; i < SMMU_MSTR_SMR_NUM; i++) {
+		vedu_write(venc, SMMU_MSTR_SMRX_1(i), s);
+		vedu_write(venc, SMMU_MSTR_SMRX_2(i), e);
 	}
 }
 

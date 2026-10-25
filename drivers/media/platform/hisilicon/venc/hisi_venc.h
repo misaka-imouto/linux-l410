@@ -38,18 +38,42 @@
 struct hivenc_dev;
 struct hivenc_ctx;
 
-/* DMA contiguous auxiliary buffer (for internal reference and scratch frames) */
-struct hivenc_aux_buf {
-	void *vaddr;
-	dma_addr_t dma;
-	size_t size;
-};
-
 /* Buffer mapped into the encoder's private SMMU address space */
 struct hivenc_mapping {
 	u64 iova;
 	size_t size;
 };
+
+/* DMA contiguous auxiliary buffer (for internal reference and scratch frames) */
+struct hivenc_aux_buf {
+	void *vaddr;
+	dma_addr_t dma;
+	size_t size;
+	struct hivenc_mapping map;
+};
+
+/* vb2 buffer carrying its own SMMU mapping (mapped in buf_init) */
+struct hivenc_src_buffer {
+	struct v4l2_m2m_buffer m2m;
+	struct hivenc_mapping map;
+	bool mapped;
+};
+
+struct hivenc_dst_buffer {
+	struct v4l2_m2m_buffer m2m;
+	struct hivenc_mapping map;
+	bool mapped;
+};
+
+static inline struct hivenc_src_buffer *vb2_to_hivenc_src(struct vb2_buffer *vb)
+{
+	return container_of(vb, struct hivenc_src_buffer, m2m.vb.vb2_buf);
+}
+
+static inline struct hivenc_dst_buffer *vb2_to_hivenc_dst(struct vb2_buffer *vb)
+{
+	return container_of(vb, struct hivenc_dst_buffer, m2m.vb.vb2_buf);
+}
 
 /* Private SMMU state */
 struct hivenc_mmu {
@@ -154,6 +178,9 @@ void hivenc_mmu_powered_off(struct hivenc_dev *venc);
 int hivenc_mmu_map_sgt(struct hivenc_dev *venc, struct sg_table *sgt,
 		       size_t size, struct hivenc_mapping *map);
 void hivenc_mmu_unmap(struct hivenc_dev *venc, struct hivenc_mapping *map);
+int hivenc_mmu_map_phys(struct hivenc_dev *venc, phys_addr_t pa, size_t size,
+			struct hivenc_mapping *map);
+void hivenc_smmu_set_window(struct hivenc_dev *venc, u64 start, u64 end);
 
 int hivenc_aux_alloc(struct hivenc_dev *venc, struct hivenc_aux_buf *buf,
 		     size_t size);
