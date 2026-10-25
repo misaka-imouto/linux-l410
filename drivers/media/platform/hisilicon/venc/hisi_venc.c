@@ -42,6 +42,10 @@ static uint reg_shift;
 module_param(reg_shift, uint, 0644);
 MODULE_PARM_DESC(reg_shift, "byte offset added to VEDU core register writes");
 
+static uint mode_extra;
+module_param(mode_extra, uint, 0644);
+MODULE_PARM_DESC(mode_extra, "bits ORed into the template MODE value");
+
 /* bring-up bisect: skip the VEDU register programming / the start kick */
 static bool skip_regs;
 module_param(skip_regs, bool, 0644);
@@ -704,9 +708,13 @@ static void hivenc_device_run(void *priv)
 		dev_info(venc->dev, "reg_shift %#x applied\n", sh);
 	}
 
-	for (i = 0; i < ARRAY_SIZE(hivenc_idr_template); i++)
-		vedu_write(venc, hivenc_idr_template[i].reg + reg_shift,
-			   hivenc_idr_template[i].val);
+	for (i = 0; i < ARRAY_SIZE(hivenc_idr_template); i++) {
+		u32 val = hivenc_idr_template[i].val;
+
+		if (hivenc_idr_template[i].reg == VEDU_REG_VEDU_VCPI_MODE)
+			val |= mode_extra;
+		vedu_write(venc, hivenc_idr_template[i].reg + reg_shift, val);
+	}
 
 	if (no_start) {
 		dev_warn(venc->dev, "no_start: VEDU programmed but not started\n");
