@@ -186,18 +186,49 @@ static void hivenc_watchdog_func(struct work_struct *work)
 
 /* ------------------------------------------------------------------ irq */
 
+/* the SMMU latches its own fault interrupt and must be cleared separately */
+static void hivenc_smmu_clear_fault(struct hivenc_dev *venc)
+{
+	u32 st = vedu_read(venc, SMMU_INTSTAT_NS);
+
+	if (st)
+		vedu_write(venc, SMMU_INTCLR_NS, st);
+	vedu_write(venc, SMMU_MSTR_DEBUG(0x4c), 0x1f);
+}
+
 static irqreturn_t hivenc_irq(int irq, void *priv)
 {
 	struct hivenc_dev *venc = priv;
-	u32 rawint;
+	u32 st, raw, smmu, mst, sid, addr, wsid, waddr;
 
 	/* the vendor ISR reads FUNC_VCPI_INTSTAT, RAWINT is only for the info */
-	rawint = vedu_read(venc, VEDU_REG_FUNC_VCPI_INTSTAT);
-	if (!rawint)
+	st = vedu_read(venc, VEDU_REG_FUNC_VCPI_INTSTAT);
+	raw = vedu_read(venc, VEDU_REG_FUNC_VCPI_RAWINT);
+	smmu = vedu_read(venc, SMMU_INTSTAT_NS);
+	mst = vedu_read(venc, SMMU_MSTR_DEBUG(0x44));
+	if (!st && !raw && !smmu && !mst) {
+		dev_info_ratelimited(venc->dev,
+			"irq: nothing latched (intstat %#x raw %#x smmu %#x mstr %#x)\n",
+			st, raw, smmu, mst);
 		return IRQ_NONE;
+	}
 
-	venc->hw_status = rawint;
-	vedu_write(venc, VEDU_VCPI_INTCLR, rawint);
+	sid = vedu_read(venc, SMMU_MSTR_DEBUG(0x50));
+	addr = vedu_read(venc, SMMU_MSTR_DEBUG(0x54));
+	wsid = vedu_read(venc, SMMU_MSTR_DEBUG(0x58));
+	waddr = vedu_read(venc, SMMU_MSTR_DEBUG(0x5c));
+	dev_info_ratelimited(venc->dev,
+		"irq: intstat %#x raw %#x smmu %#x/%#x mstr %#x sid %#x addr %#x w %#x/%#x\n",
+		st, raw, smmu, vedu_read(venc, SMMU_ERR_RDADDR_NS), mst,
+		sid, addr, wsid, waddr);
+
+	vedu_write(venc, VEDU_VCPI_INTCLR, st ? st : 0xffffffff);
+	hivenc_smmu_clear_fault(venc);
+
+	if (!st)
+		return IRQ_HANDLED;
+
+	venc->hw_status = st;
 	return IRQ_WAKE_THREAD;
 }
 
@@ -452,6 +483,10 @@ static void hivenc_device_run(void *priv)
 		return;
 	}
 
+	dev_info_ratelimited(venc->dev,
+		"start: mode %#x size %ux%u src %#llx rec %#llx strm %#llx\n",
+		vedu_read(venc, VEDU_REG_VEDU_VCPI_MODE), width, height,
+		src_y_iova, rec_y_iova, strm_iova);
 	schedule_delayed_work(&venc->watchdog_work, msecs_to_jiffies(500));
 	vedu_write(venc, VEDU_REG_VEDU_VCPI_START, 0);
 	vedu_write(venc, VEDU_REG_VEDU_VCPI_START, 1);
