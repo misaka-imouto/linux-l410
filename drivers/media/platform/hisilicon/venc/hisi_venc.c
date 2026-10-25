@@ -46,6 +46,10 @@ static uint mode_extra;
 module_param(mode_extra, uint, 0644);
 MODULE_PARM_DESC(mode_extra, "bits ORed into the template MODE value");
 
+static uint start_mode;
+module_param(start_mode, uint, 0644);
+MODULE_PARM_DESC(start_mode, "start sequence variant (bring-up)");
+
 /* bring-up bisect: skip the VEDU register programming / the start kick */
 static bool skip_regs;
 module_param(skip_regs, bool, 0644);
@@ -306,7 +310,12 @@ static void hivenc_watchdog_func(struct work_struct *work)
 	}
 
 	dev_err(venc->dev,
-		"encoding timeout! rawint=%#x intstat=%#x timer=%#x busy=%#x strm=%u smmu=%#x rd=%#x wr=%#x\n",
+		"encoding timeout! mode=%#x picsize=%#x src=%#x/%#x start=%#x rawint=%#x intstat=%#x timer=%#x busy=%#x strm=%u smmu=%#x rd=%#x wr=%#x\n",
+		vedu_read(venc, VEDU_REG_VEDU_VCPI_MODE),
+		vedu_read(venc, VEDU_REG_VEDU_VCPI_PICSIZE_PIX),
+		vedu_read(venc, VEDU_REG_VEDU_VCPI_SRC_YADDR_L),
+		vedu_read(venc, VEDU_REG_VEDU_VCPI_SRC_YADDR_H),
+		vedu_read(venc, VEDU_REG_VEDU_VCPI_START),
 		vedu_read(venc, VEDU_REG_FUNC_VCPI_RAWINT),
 		vedu_read(venc, VEDU_REG_FUNC_VCPI_INTSTAT),
 		vedu_read(venc, VEDU_REG_FUNC_VCPI_VEDU_TIMER),
@@ -730,8 +739,35 @@ static void hivenc_device_run(void *priv)
 		vedu_read(venc, SMMU_MSTR_DEBUG(0x40)),
 		vedu_read(venc, VEDU_REG_FUNC_VCPI_INTSTAT));
 	schedule_delayed_work(&venc->watchdog_work, msecs_to_jiffies(500));
-	vedu_write(venc, VEDU_REG_VEDU_VCPI_START + reg_shift, 0);
-	vedu_write(venc, VEDU_REG_VEDU_VCPI_START + reg_shift, 1);
+	switch (start_mode) {
+	case 1:
+		vedu_write(venc, VEDU_REG_VEDU_VCPI_START, 1);
+		vedu_write(venc, VEDU_REG_VEDU_VCPI_START, 0);
+		break;
+	case 2:
+		vedu_write(venc, VEDU_REG_VEDU_VCPI_INTMASK, 0);
+		vedu_write(venc, VEDU_REG_VEDU_VCPI_START, 0);
+		vedu_write(venc, VEDU_REG_VEDU_VCPI_START, 1);
+		vedu_write(venc, VEDU_REG_VEDU_VCPI_INTMASK, 0xcf);
+		break;
+	case 3:
+		vedu_write(venc, VEDU_REG_VEDU_BUS_IDLE_REQ, 1);
+		udelay(10);
+		vedu_write(venc, VEDU_REG_VEDU_BUS_IDLE_REQ, 0);
+		vedu_write(venc, VEDU_REG_VEDU_VCPI_START, 0);
+		vedu_write(venc, VEDU_REG_VEDU_VCPI_START, 1);
+		break;
+	case 4:
+		vedu_write(venc, VEDU_REG_VEDU_VCPI_START, 1);
+		(void)vedu_read(venc, VEDU_REG_VEDU_VCPI_START);
+		vedu_write(venc, VEDU_REG_VEDU_VCPI_START, 0);
+		vedu_write(venc, VEDU_REG_VEDU_VCPI_START, 1);
+		break;
+	default:
+		vedu_write(venc, VEDU_REG_VEDU_VCPI_START + reg_shift, 0);
+		vedu_write(venc, VEDU_REG_VEDU_VCPI_START + reg_shift, 1);
+		break;
+	}
 	mutex_unlock(&venc->hw_lock);
 	return;
 
