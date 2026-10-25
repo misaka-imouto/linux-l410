@@ -4,4 +4,18 @@
 // driver core does not defer the probe.
 &{/venc} {
 	/delete-property/ iommus;
+
+	/*
+	 * The firmware node only lists the DVFS clocks.  The core gate
+	 * (CRG 0xf0 bit 9) and the media AXI/APB/functional gates live in
+	 * separate clock nodes and must be enabled as well, otherwise the
+	 * VEDU register file works but the pipeline never starts.
+	 */
+	clocks = <&{/clocks@0/clk_venc} &{/clocks@0/clk_venc2}
+		  &{/clocks@0/crgctrl@0xFFF05000/clkgt_venc}
+		  &{/clocks@0/media2_crgctrl@0xE9300000/aclk_venc}
+		  &{/clocks@0/media2_crgctrl@0xE9300000/pclk_venc}
+		  &{/clocks@0/media2_crgctrl@0xE9300000/clk_vencfreq}>;
+	clock-names = "clk_venc", "clk_venc1", "clkgt_venc",
+		      "aclk_venc", "pclk_venc", "clk_vencfreq";
 };

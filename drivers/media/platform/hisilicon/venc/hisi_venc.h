@@ -141,8 +141,14 @@ struct hivenc_dev {
 	struct mutex hw_lock;
 
 	void __iomem *regs;
+	void __iomem *regs0;
+	void __iomem *regs1;
 	struct clk *clk;
 	struct clk *clk1;
+	struct clk *clk_gate;
+	struct clk *aclk;
+	struct clk *pclk;
+	struct clk *clkfreq;
 	struct regulator *venc_supply;
 	struct regulator *venc1_supply;
 	struct regulator *media_supply;

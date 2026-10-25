@@ -42,6 +42,10 @@ static uint reg_shift;
 module_param(reg_shift, uint, 0644);
 MODULE_PARM_DESC(reg_shift, "byte offset added to VEDU core register writes");
 
+static uint core_sel;
+module_param(core_sel, uint, 0644);
+MODULE_PARM_DESC(core_sel, "VEDU core to drive (0 or 1)");
+
 static uint mode_extra;
 module_param(mode_extra, uint, 0644);
 MODULE_PARM_DESC(mode_extra, "bits ORed into the template MODE value");
@@ -228,6 +232,11 @@ static int hivenc_power_on(struct hivenc_dev *venc)
 	unsigned int level = min(clk_level, 3U);
 	int ret;
 
+	if (core_sel && venc->regs1)
+		venc->regs = venc->regs1;
+	else
+		venc->regs = venc->regs0;
+
 	ret = regulator_enable(venc->media_supply);
 	if (ret)
 		return ret;
@@ -251,6 +260,15 @@ static int hivenc_power_on(struct hivenc_dev *venc)
 		if (level != 3)
 			clk_set_rate(venc->clk1, venc->clk_rate[level]);
 	}
+	/*
+	 * The DVFS clocks above only cover the mux/divider; the real core gate
+	 * (CRG 0xf0 bit 9) and the media AXI/APB gates are separate clocks.
+	 * Without them the VEDU register file answers but the pipeline never runs.
+	 */
+	clk_prepare_enable(venc->clk_gate);
+	clk_prepare_enable(venc->aclk);
+	clk_prepare_enable(venc->pclk);
+	clk_prepare_enable(venc->clkfreq);
 
 	if (level != 3) {
 		ret = clk_set_rate(venc->clk, venc->clk_rate[level]);
@@ -271,8 +289,11 @@ static int hivenc_power_on(struct hivenc_dev *venc)
 	/* is the block really clocked and decoding our writes? */
 	vedu_write(venc, VEDU_REG_VEDU_VCPI_FRAMENO, 0x12345678);
 	ret = vedu_read(venc, VEDU_REG_VEDU_VCPI_FRAMENO);
-	dev_info(venc->dev, "VEDU probe: frameno readback %#x, clk %u Hz, clk1 %s\n",
-		 ret, clk_get_rate(venc->clk), venc->clk1 ? "on" : "none");
+	dev_info(venc->dev,
+		 "VEDU probe: frameno %#x clk %u Hz gate %s aclk %s pclk %s freq %s\n",
+		 ret, clk_get_rate(venc->clk),
+		 venc->clk_gate ? "on" : "none", venc->aclk ? "on" : "none",
+		 venc->pclk ? "on" : "none", venc->clkfreq ? "on" : "none");
 	return 0;
 
 err_clk:
@@ -286,6 +307,10 @@ static void hivenc_power_off(struct hivenc_dev *venc)
 {
 	venc->powered = false;
 	vedu_write(venc, VEDU_VCPI_INTMASK, 0);
+	clk_disable_unprepare(venc->clkfreq);
+	clk_disable_unprepare(venc->pclk);
+	clk_disable_unprepare(venc->aclk);
+	clk_disable_unprepare(venc->clk_gate);
 	regulator_disable(venc->venc_supply);
 	clk_set_rate(venc->clk, venc->clk_rate[3]);
 	clk_disable_unprepare(venc->clk);
@@ -1278,9 +1303,13 @@ static int hivenc_probe(struct platform_device *pdev)
 	init_completion(&venc->job_done);
 	INIT_DELAYED_WORK(&venc->watchdog_work, hivenc_watchdog_func);
 
-	venc->regs = devm_platform_ioremap_resource(pdev, 0);
-	if (IS_ERR(venc->regs))
-		return PTR_ERR(venc->regs);
+	venc->regs0 = devm_platform_ioremap_resource(pdev, 0);
+	if (IS_ERR(venc->regs0))
+		return PTR_ERR(venc->regs0);
+	venc->regs1 = devm_platform_ioremap_resource(pdev, 1);
+	if (IS_ERR(venc->regs1))
+		venc->regs1 = NULL;
+	venc->regs = venc->regs0;
 
 	venc->clk = devm_clk_get(dev, "clk_venc");
 	if (IS_ERR(venc->clk))
@@ -1294,6 +1323,18 @@ static int hivenc_probe(struct platform_device *pdev)
 	if (IS_ERR(venc->venc_supply))
 		return dev_err_probe(dev, PTR_ERR(venc->venc_supply), "Failed to get ldo_venc\n");
 
+	venc->clk_gate = devm_clk_get_optional(dev, "clkgt_venc");
+	if (IS_ERR(venc->clk_gate))
+		venc->clk_gate = NULL;
+	venc->aclk = devm_clk_get_optional(dev, "aclk_venc");
+	if (IS_ERR(venc->aclk))
+		venc->aclk = NULL;
+	venc->pclk = devm_clk_get_optional(dev, "pclk_venc");
+	if (IS_ERR(venc->pclk))
+		venc->pclk = NULL;
+	venc->clkfreq = devm_clk_get_optional(dev, "clk_vencfreq");
+	if (IS_ERR(venc->clkfreq))
+		venc->clkfreq = NULL;
 	venc->clk1 = devm_clk_get_optional(dev, "clk_venc1");
 	if (IS_ERR(venc->clk1))
 		venc->clk1 = NULL;
