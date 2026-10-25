@@ -142,7 +142,9 @@ struct hivenc_dev {
 
 	void __iomem *regs;
 	struct clk *clk;
+	struct clk *clk1;
 	struct regulator *venc_supply;
+	struct regulator *venc1_supply;
 	struct regulator *media_supply;
 	u32 clk_rate[4];
 

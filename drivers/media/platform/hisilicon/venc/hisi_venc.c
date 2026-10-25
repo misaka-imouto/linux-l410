@@ -93,6 +93,14 @@ static int hivenc_power_on(struct hivenc_dev *venc)
 	if (ret)
 		goto err_clk;
 
+	if (venc->venc1_supply)
+		regulator_enable(venc->venc1_supply);
+	if (venc->clk1) {
+		clk_prepare_enable(venc->clk1);
+		if (level != 3)
+			clk_set_rate(venc->clk1, venc->clk_rate[level]);
+	}
+
 	if (level != 3) {
 		ret = clk_set_rate(venc->clk, venc->clk_rate[level]);
 		if (ret)
@@ -108,6 +116,12 @@ static int hivenc_power_on(struct hivenc_dev *venc)
 	vedu_write(venc, VEDU_VCPI_INTMASK,
 		   RAWINT_VE_EOP | RAWINT_VEDU_SLC_END | RAWINT_VE_BUFFULL |
 		   RAWINT_VEDU_TIMEOUT);
+
+	/* is the block really clocked and decoding our writes? */
+	vedu_write(venc, VEDU_REG_VEDU_VCPI_FRAMENO, 0x12345678);
+	ret = vedu_read(venc, VEDU_REG_VEDU_VCPI_FRAMENO);
+	dev_info(venc->dev, "VEDU probe: frameno readback %#x, clk %u Hz, clk1 %s\n",
+		 ret, clk_get_rate(venc->clk), venc->clk1 ? "on" : "none");
 	return 0;
 
 err_clk:
@@ -177,12 +191,12 @@ static irqreturn_t hivenc_irq(int irq, void *priv)
 	struct hivenc_dev *venc = priv;
 	u32 rawint;
 
-	rawint = vedu_read(venc, VEDU_REG_FUNC_VCPI_RAWINT);
+	/* the vendor ISR reads FUNC_VCPI_INTSTAT, RAWINT is only for the info */
+	rawint = vedu_read(venc, VEDU_REG_FUNC_VCPI_INTSTAT);
 	if (!rawint)
 		return IRQ_NONE;
 
 	venc->hw_status = rawint;
-	/* Clear interrupt */
 	vedu_write(venc, VEDU_VCPI_INTCLR, rawint);
 	return IRQ_WAKE_THREAD;
 }
@@ -218,7 +232,10 @@ static irqreturn_t hivenc_irq_thread(int irq, void *priv)
 		u8 *dst_vaddr = vb2_plane_vaddr(&dst_buf->vb2_buf, 0);
 		size_t hdr_len = 0;
 
-		bytes_encoded = vedu_read(venc, VEDU_REG_FUNC_VLC_PIC_STRMSIZE);
+		bytes_encoded = vedu_read(venc,
+			ctx->proto == HIVENC_PROTO_HEVC ?
+			VEDU_REG_FUNC_CABAC_PIC_STRMSIZE :
+			VEDU_REG_FUNC_VLC_PIC_STRMSIZE);
 		venc->encoded_bytes = bytes_encoded;
 
 		is_idr = (ctx->frame_count == 0) || ctx->force_key_frame ||
@@ -289,6 +306,9 @@ static u32 hivenc_vcpu_mode(struct hivenc_ctx *ctx, bool is_idr)
 
 	if (ctx->proto == HIVENC_PROTO_HEVC)
 		v = 0;			/* VEDU_H265 */
+	v |= BIT(4);			/* register config mode (not cmdlist) */
+	v |= BIT(5);			/* slice interrupt enable */
+	v |= BIT(28);			/* vedu timer enable */
 	v |= (ft & 3) << 10;
 	if (is_idr)
 		v |= BIT(16);
@@ -377,6 +397,7 @@ static void hivenc_device_run(void *priv)
 
 	hivenc_write64(venc, VEDU_REG_VEDU_VCPI_SRC_YADDR_L, src_y_iova);
 	hivenc_write64(venc, VEDU_REG_VEDU_VCPI_SRC_CADDR_L, src_c_iova);
+	/* STRIDE: chroma stride in the low half, luma stride in the high half */
 	vedu_write(venc, VEDU_REG_VEDU_VCPI_STRIDE,
 		   (y_stride & 0xffff) | ((y_stride & 0xffff) << 16));
 
@@ -404,10 +425,25 @@ static void hivenc_device_run(void *priv)
 	hivenc_write64(venc, VEDU_REG_VEDU_VCPI_STRMADDR_L, strm_iova);
 	vedu_write(venc, VEDU_REG_VEDU_VLCST_STRMBUFLEN, ctx->cap_q.sizeimage);
 
-	vedu_write(venc, VEDU_REG_VEDU_VCPI_QPCFG, (ctx->qp & 0x3f));
+	/* QPCFG: cr/cb offsets in 4:0 and 9:5, frame QP in 15:10 */
+	vedu_write(venc, VEDU_REG_VEDU_VCPI_QPCFG, (ctx->qp & 0x3f) << 10);
 	vedu_write(venc, VEDU_REG_VEDU_QPG_MAX_MIN_QP,
-		   (10 & 0x3f) | ((51 & 0x3f) << 8));
+		   (10 & 0x3f) | ((51 & 0x3f) << 8) | BIT(16));
 	vedu_write(venc, VEDU_REG_VEDU_VCPI_DBLKCFG, 0);
+
+	/* ring-buffer pointers: both at the start of the stream buffer */
+	hivenc_write64(venc, VEDU_REG_VEDU_VCPI_SWPTRADDR_L, strm_iova);
+	hivenc_write64(venc, VEDU_REG_VEDU_VCPI_SRPTRADDR_L, strm_iova);
+
+	/* linear 8-bit stream format, CAVLC, single slice */
+	vedu_write(venc, VEDU_REG_VEDU_VCPI_STRFMT, 0);
+	vedu_write(venc, VEDU_REG_VEDU_VCPI_VLC_CONFIG, 0);
+	vedu_write(venc, VEDU_REG_VEDU_VLC_SLCHDRPARA, 0);
+	vedu_write(venc, VEDU_REG_VEDU_VLC_SLCHDRSTRM0, 0);
+	vedu_write(venc, VEDU_REG_VEDU_VLC_SLCHDRSTRM1, 0);
+	vedu_write(venc, VEDU_REG_VEDU_VCPI_MULTISLC, 0);
+	vedu_write(venc, VEDU_REG_VEDU_VCPI_TIMEOUT, 0x00ffffff);
+	vedu_write(venc, VEDU_REG_VEDU_VCPI_INTCLR, 0xffffffff);
 
 	if (no_start) {
 		dev_warn(venc->dev, "no_start: VEDU programmed but not started\n");
@@ -417,6 +453,7 @@ static void hivenc_device_run(void *priv)
 	}
 
 	schedule_delayed_work(&venc->watchdog_work, msecs_to_jiffies(500));
+	vedu_write(venc, VEDU_REG_VEDU_VCPI_START, 0);
 	vedu_write(venc, VEDU_REG_VEDU_VCPI_START, 1);
 	mutex_unlock(&venc->hw_lock);
 	return;
@@ -943,6 +980,13 @@ static int hivenc_probe(struct platform_device *pdev)
 	venc->venc_supply = devm_regulator_get(dev, "ldo_venc");
 	if (IS_ERR(venc->venc_supply))
 		return dev_err_probe(dev, PTR_ERR(venc->venc_supply), "Failed to get ldo_venc\n");
+
+	venc->clk1 = devm_clk_get_optional(dev, "clk_venc1");
+	if (IS_ERR(venc->clk1))
+		venc->clk1 = NULL;
+	venc->venc1_supply = devm_regulator_get_optional(dev, "ldo_venc1");
+	if (IS_ERR(venc->venc1_supply))
+		venc->venc1_supply = NULL;
 
 	if (of_property_read_u32_array(dev->of_node, "enc_clk_rate",
 				       venc->clk_rate, 4)) {
