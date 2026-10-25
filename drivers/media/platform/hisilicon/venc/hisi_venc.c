@@ -13,6 +13,7 @@
 #include <linux/iopoll.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/panic_notifier.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/slab.h>
@@ -817,6 +818,34 @@ static const struct v4l2_file_operations hivenc_fops = {
 	.mmap = v4l2_m2m_fop_mmap,
 };
 
+/*
+ * SError from the VEDU/SMMU is asynchronous, so the faulting address and the
+ * stream ID are only in the SMMU registers by the time the kernel panics.
+ * Dump them so the next bring-up step has something to work with.
+ */
+static int hivenc_panic_notify(struct notifier_block *nb, unsigned long action,
+			       void *data)
+{
+	struct hivenc_dev *venc = container_of(nb, struct hivenc_dev, panic_nb);
+
+	if (!venc->powered)
+		return NOTIFY_DONE;
+
+	pr_emerg("hisi-venc: RAWINT %#x SMMU INTSTAT %#x RD %#x/%#x WR %#x/%#x\n",
+		 vedu_read(venc, VEDU_REG_FUNC_VCPI_RAWINT),
+		 vedu_read(venc, SMMU_INTSTAT_NS),
+		 vedu_read(venc, SMMU_ERR_RDADDR_NS),
+		 vedu_read(venc, SMMU_ERR_ADDR_MSB_NS),
+		 vedu_read(venc, SMMU_ERR_WRADDR_NS),
+		 vedu_read(venc, SMMU_ERR_ADDR_MSB_NS));
+	pr_emerg("hisi-venc: MSTR SID/ADDR %#x %#x %#x %#x\n",
+		 vedu_read(venc, SMMU_MSTR_DEBUG(0x44)),
+		 vedu_read(venc, SMMU_MSTR_DEBUG(0x50)),
+		 vedu_read(venc, SMMU_MSTR_DEBUG(0x54)),
+		 vedu_read(venc, SMMU_MSTR_DEBUG(0x58)));
+	return NOTIFY_DONE;
+}
+
 static const struct v4l2_m2m_ops hivenc_m2m_ops = {
 	.device_run = hivenc_device_run,
 };
@@ -926,6 +955,9 @@ static int hivenc_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_m2m;
 
+	venc->panic_nb.notifier_call = hivenc_panic_notify;
+	atomic_notifier_chain_register(&panic_notifier_list, &venc->panic_nb);
+
 	dev_info(dev, "HiSilicon Kirin 990 VENC initialized (IRQ %d, clock %u Hz)\n",
 		 venc->irq, venc->clk_rate[clk_level < 4 ? clk_level : 1]);
 	return 0;
@@ -946,6 +978,7 @@ static void hivenc_remove(struct platform_device *pdev)
 	struct hivenc_dev *venc = platform_get_drvdata(pdev);
 
 	cancel_delayed_work_sync(&venc->watchdog_work);
+	atomic_notifier_chain_unregister(&panic_notifier_list, &venc->panic_nb);
 	video_unregister_device(&venc->vdev);
 	v4l2_m2m_release(venc->m2m_dev);
 	v4l2_device_unregister(&venc->v4l2_dev);

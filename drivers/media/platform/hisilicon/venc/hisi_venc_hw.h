@@ -11,6 +11,8 @@
 #include <linux/bits.h>
 #include <linux/types.h>
 
+#include "hisi_venc_regs.h"
+
 /* VEDU Core Registers (Offsets from venc core base) */
 #define VEDU_VCPI_INTMASK		0x0000
 #define VEDU_VCPI_INTCLR		0x0004
@@ -107,6 +109,7 @@
 
 #define SMMU_MSTR_BASE			0x1a000
 #define SMMU_MSTR_GLB_BYPASS		(SMMU_MSTR_BASE + 0x000)
+#define SMMU_MSTR_DEBUG(n)		(SMMU_MSTR_BASE + (n))
 #define SMMU_MSTR_SMRX_0(n)		(SMMU_MSTR_BASE + 0x100 + 4 * (n))
 #define SMMU_MSTR_SMRX_1(n)		(SMMU_MSTR_BASE + 0x260 + 4 * (n))
 #define SMMU_MSTR_SMRX_2(n)		(SMMU_MSTR_BASE + 0x3c0 + 4 * (n))

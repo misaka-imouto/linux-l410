@@ -133,6 +133,7 @@ struct hivenc_dev {
 
 	struct dentry *debugfs;
 	u32 debug;
+	struct notifier_block panic_nb;
 };
 
 static inline u32 vedu_read(struct hivenc_dev *venc, u32 reg)
