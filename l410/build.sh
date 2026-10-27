@@ -52,6 +52,11 @@ for t in aarch64-linux-gnu-gcc make bc bison flex dtc cpio depmod curl; do
 	command -v $t > /dev/null || { echo "missing host tool: $t (see --help)" >&2; exit 1; }
 done
 export ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
+# scripts/mkcompile_h puts the build account and host into the version banner
+# ("Linux version ... (user@host)").  Pin them so a published Image does not
+# carry whoever happened to build it, and so two builders get the same string.
+export KBUILD_BUILD_USER=${KBUILD_BUILD_USER:-l410}
+export KBUILD_BUILD_HOST=${KBUILD_BUILD_HOST:-l410}
 CC=aarch64-linux-gnu-gcc
 command -v ccache > /dev/null && CC="ccache aarch64-linux-gnu-gcc"
 MK=(make -C "$TREE" O="$OBJ" -j"$JOBS" CC="$CC" LOCALVERSION="${NAME:+-$NAME}")
