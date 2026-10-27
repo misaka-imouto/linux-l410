@@ -1061,13 +1061,19 @@ static int __i2c_hid_core_probe(struct i2c_hid *ihid)
 {
 	struct i2c_client *client = ihid->client;
 	struct hid_device *hid = ihid->hid;
+	bool probed;
 	int ret;
 
-	ret = i2c_hid_probe_address(ihid);
-	if (ret < 0) {
-		i2c_hid_dbg(ihid, "nothing at this address: %d\n", ret);
-		return -ENXIO;
-	}
+	/*
+	 * The address probe is only a hint that something answers on the bus:
+	 * it uses a bare SMBus read, which some devices NAK while they answer
+	 * the HID descriptor read just fine (the Goodix touchpad on the L410,
+	 * 27C6:01E0, does exactly that).  Do not treat it as fatal; the
+	 * descriptor read below is what decides whether a device is there.
+	 */
+	probed = i2c_hid_probe_address(ihid) == 0;
+	if (!probed)
+		i2c_hid_dbg(ihid, "no answer to the address probe, trying the descriptor\n");
 
 	ret = i2c_hid_fetch_hid_descriptor(ihid);
 	if (ret < 0) {
@@ -1080,8 +1086,10 @@ static int __i2c_hid_core_probe(struct i2c_hid *ihid)
 		ret = i2c_hid_fetch_hid_descriptor(ihid);
 	}
 	if (ret < 0) {
-		dev_err(&client->dev,
-			"Failed to fetch the HID Descriptor\n");
+		/* keep the boot log clean for DT nodes of parts this unit lacks */
+		if (probed)
+			dev_err(&client->dev,
+				"Failed to fetch the HID Descriptor\n");
 		return ret;
 	}
 
