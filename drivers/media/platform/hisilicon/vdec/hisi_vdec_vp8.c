@@ -170,6 +170,10 @@ static int hivdec_vp8_run(struct hivdec_ctx *ctx)
 	hdr = key ? 10 : 3;
 	wmb = DIV_ROUND_UP(f->width, 16);
 	hmb = DIV_ROUND_UP(f->height, 16);
+	if (hivdec_frame_geometry_changed(ctx, f->width, f->height, 8)) {
+		ret = -EINVAL;
+		goto out;
+	}
 	stride = dfmt->plane_fmt[0].bytesperline;
 	uvoff = stride * dfmt->height;
 	if (wmb * 16 > stride || hmb * 16 > dfmt->height ||

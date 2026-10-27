@@ -323,6 +323,8 @@ void hivdec_aux_sync_for_cpu(struct hivdec_dev *vdec, struct hivdec_aux_buf *buf
 /* hisi_vdec.c */
 void hivdec_hw_run(struct hivdec_ctx *ctx);
 void hivdec_job_finish(struct hivdec_ctx *ctx, enum vb2_buffer_state state);
+bool hivdec_frame_geometry_changed(struct hivdec_ctx *ctx, u32 width, u32 height,
+				   unsigned int bit_depth);
 struct media_request;
 void *hivdec_find_control_data(struct hivdec_ctx *ctx, u32 id);
 

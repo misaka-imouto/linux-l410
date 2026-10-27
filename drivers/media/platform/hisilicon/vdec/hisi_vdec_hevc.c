@@ -946,11 +946,16 @@ static int hivdec_hevc_run(struct hivdec_ctx *ctx)
 	pic.w64 = ALIGN(sps->pic_width_in_luma_samples, 64);
 	pic.ah = ALIGN(sps->pic_height_in_luma_samples, 64);
 	/* 8-bit: NV12; 10-bit: 16-bit samples (P010) */
+	if (hivdec_frame_geometry_changed(ctx, sps->pic_width_in_luma_samples,
+					  sps->pic_height_in_luma_samples,
+					  sps->bit_depth_luma_minus8 + 8)) {
+		ret = -EINVAL;
+		goto out;
+	}
 	pitch = ctx->decoded_fmt.fmt.pix_mp.plane_fmt[0].bytesperline;
 	fmt_h = ctx->decoded_fmt.fmt.pix_mp.height;
 	ystride = pitch * 8;
-	if ((sps->bit_depth_luma_minus8 ? 2 : 1) != hivdec_decoded_bps(ctx) ||
-	    pic.w64 * hivdec_decoded_bps(ctx) > pitch || pic.ah > fmt_h ||
+	if (pic.w64 * hivdec_decoded_bps(ctx) > pitch || pic.ah > fmt_h ||
 	    pitch * fmt_h * 3 / 2 > vb2_plane_size(&dst->vb2_buf, 0)) {
 		dev_err(vdec->dev, "capture buffer too small for %ux%u\n",
 			sps->pic_width_in_luma_samples, sps->pic_height_in_luma_samples);

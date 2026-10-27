@@ -386,11 +386,14 @@ static int hivdec_vp9_run(struct hivdec_ctx *ctx)
 	mi_rows = (h + 7) >> 3;
 	sb_cols = (mi_cols + 7) >> 3;
 	sb_rows = (mi_rows + 7) >> 3;
+	if (hivdec_frame_geometry_changed(ctx, w, h, f->bit_depth)) {
+		ret = -EINVAL;
+		goto out;
+	}
 	stride = dfmt->plane_fmt[0].bytesperline;
 	uvoff = stride * dfmt->height;
 	bps = hivdec_decoded_bps(ctx);
-	if (f->bit_depth != (bps == 2 ? 10 : 8) ||
-	    (w + VP9_PAD) * bps > stride || h + VP9_PAD > dfmt->height ||
+	if ((w + VP9_PAD) * bps > stride || h + VP9_PAD > dfmt->height ||
 	    uvoff * 3 / 2 > vb2_plane_size(&dst->vb2_buf, 0)) {
 		dev_err(vdec->dev, "capture buffer too small for %ux%u\n", w, h);
 		ret = -EINVAL;

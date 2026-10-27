@@ -980,6 +980,9 @@ static int hivdec_h264_decode(struct hivdec_ctx *ctx, struct vb2_v4l2_buffer *ds
 	pic.mbtodec = pic.width_mb * pic.height_mb;
 	pic.w64 = ALIGN(pic.width_mb * 16, 64);
 	pic.ah = ALIGN(pic.frame_height_mb * 16, 32);
+	if (hivdec_frame_geometry_changed(ctx, pic.width_mb * 16,
+					  pic.frame_height_mb * 16, 8))
+		return -EINVAL;
 	ystride = pic.w64 * 8;
 
 	if (pic.w64 > ctx->decoded_fmt.fmt.pix_mp.plane_fmt[0].bytesperline ||

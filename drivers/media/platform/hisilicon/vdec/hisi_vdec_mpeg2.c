@@ -298,6 +298,8 @@ static int hivdec_mpeg2_decode(struct hivdec_ctx *ctx, struct vb2_v4l2_buffer *d
 	frame_hmb = (seq->flags & V4L2_MPEG2_SEQ_FLAG_PROGRESSIVE) ?
 		    DIV_ROUND_UP(seq->vertical_size, 16) : 2 * DIV_ROUND_UP(seq->vertical_size, 32);
 	hmb = field ? frame_hmb / 2 : DIV_ROUND_UP(seq->vertical_size, 16);
+	if (hivdec_frame_geometry_changed(ctx, seq->horizontal_size, seq->vertical_size, 8))
+		return -EINVAL;
 	stride = dfmt->plane_fmt[0].bytesperline;
 	uvoff = stride * dfmt->height;
 	if (wmb * 16 > stride || frame_hmb * 16 > dfmt->height ||

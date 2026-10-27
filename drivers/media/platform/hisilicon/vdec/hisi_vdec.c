@@ -25,6 +25,17 @@ static unsigned int clk_level = 1;
 module_param(clk_level, uint, 0644);
 MODULE_PARM_DESC(clk_level, "decoder clock: 0 = 480 MHz, 1 = 332 MHz, 2 = 277 MHz, 3 = 185 MHz");
 
+/*
+ * 10-bit streams decode to a single-plane P010 buffer. Chromium (as of 155)
+ * cannot lay such a buffer out, so announcing HEVC Main 10 and VP9 profile 2
+ * makes it pick P010 and then fail to wrap the frame; keep them out of the
+ * profile menus unless the client can render P010.
+ */
+static bool expose_10bit;
+module_param(expose_10bit, bool, 0644);
+MODULE_PARM_DESC(expose_10bit,
+		 "announce HEVC Main 10 and VP9 profile 2 to clients that can lay out P010");
+
 /* ------------------------------------------------------------------ formats */
 
 static const u32 hivdec_yuv420_fmts[] = { V4L2_PIX_FMT_NV12 };
@@ -90,7 +101,7 @@ static const struct hivdec_ctrl_desc hivdec_hevc_ctrls[] = {
 		.cfg.id = V4L2_CID_MPEG_VIDEO_HEVC_PROFILE,
 		.cfg.min = V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN,
 		.cfg.max = V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_10,
-		/* 10-bit decodes to single-plane P010, which Chromium cannot lay out */
+		/* 10-bit decodes to single-plane P010; Chromium cannot lay that out */
 		.cfg.menu_skip_mask = BIT(V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_10),
 		.cfg.def = V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN,
 	},
@@ -291,6 +302,59 @@ static void hivdec_reset_decoded_fmt(struct hivdec_ctx *ctx)
 	hivdec_fill_decoded_pixfmt(ctx, &f->fmt.pix_mp);
 }
 
+/*
+ * A stateless decoder has no in-band renegotiation: the CAPTURE format is fixed
+ * before STREAMON and only the client can change it. When a frame does not fit
+ * the buffer geometry (aligned size, stride, pixel format, bit depth) the
+ * buffers were set up for, publish the new format through VIDIOC_G_FMT and
+ * tell the client with V4L2_EVENT_SOURCE_CHANGE. The caller must then refuse
+ * the frame: decoding it would either overrun the buffer or, for a smaller
+ * picture, hand the client a frame labelled with the old size (silently
+ * cropped output).
+ *
+ * The comparison is on the buffer geometry, not on the coded size: clients pass
+ * the cropped dimensions (1080 instead of the 1088 macroblock lines of H.264)
+ * and the padding covers that difference.
+ */
+bool hivdec_frame_geometry_changed(struct hivdec_ctx *ctx, u32 width, u32 height,
+				   unsigned int bit_depth)
+{
+	const struct hivdec_coded_fmt_desc *desc = ctx->coded_fmt_desc;
+	const struct v4l2_pix_format_mplane *cur = &ctx->decoded_fmt.fmt.pix_mp;
+	struct v4l2_pix_format_mplane want = *cur;
+	static const struct v4l2_event ev = {
+		.type = V4L2_EVENT_SOURCE_CHANGE,
+		.u.src_change.changes = V4L2_EVENT_SRC_CH_RESOLUTION,
+	};
+	u32 pixfmt = V4L2_PIX_FMT_NV12;
+	unsigned int i;
+
+	/* only codecs that can output 10-bit pictures get P010 */
+	if (bit_depth > 8)
+		for (i = 0; i < desc->num_decoded_fmts; i++)
+			if (desc->decoded_fmts[i] == V4L2_PIX_FMT_P010)
+				pixfmt = V4L2_PIX_FMT_P010;
+
+	want.pixelformat = pixfmt;
+	want.width = width;
+	want.height = height;
+	hivdec_fill_decoded_pixfmt(ctx, &want);
+
+	if (want.pixelformat == cur->pixelformat && want.width == cur->width &&
+	    want.height == cur->height && bit_depth == ctx->bit_depth)
+		return false;
+
+	dev_info(ctx->dev->dev,
+		 "%.4s source change: %ux%u %u-bit -> %ux%u %u-bit\n",
+		 (const char *)&desc->fourcc, cur->width, cur->height,
+		 ctx->bit_depth, want.width, want.height, bit_depth);
+
+	ctx->bit_depth = bit_depth;
+	ctx->decoded_fmt.fmt.pix_mp = want;
+	v4l2_event_queue_fh(&ctx->fh, &ev);
+	return true;
+}
+
 static void hivdec_reset_coded_fmt(struct hivdec_ctx *ctx)
 {
 	struct v4l2_format *f = &ctx->coded_fmt;
@@ -382,6 +446,19 @@ static int hivdec_querycap(struct file *file, void *priv,
 	strscpy(cap->card, vdev->name, sizeof(cap->card));
 	/* bus_info is filled in by the core, matching the media device */
 	return 0;
+}
+
+static int hivdec_subscribe_event(struct v4l2_fh *fh,
+				  const struct v4l2_event_subscription *sub)
+{
+	switch (sub->type) {
+	case V4L2_EVENT_SOURCE_CHANGE:
+		return v4l2_src_change_event_subscribe(fh, sub);
+	case V4L2_EVENT_CTRL:
+		return v4l2_ctrl_subscribe_event(fh, sub);
+	default:
+		return -EINVAL;
+	}
 }
 
 static int hivdec_try_capture_fmt(struct file *file, void *priv,
@@ -598,7 +675,7 @@ static const struct v4l2_ioctl_ops hivdec_ioctl_ops = {
 	.vidioc_create_bufs = v4l2_m2m_ioctl_create_bufs,
 	.vidioc_expbuf = v4l2_m2m_ioctl_expbuf,
 
-	.vidioc_subscribe_event = v4l2_ctrl_subscribe_event,
+	.vidioc_subscribe_event = hivdec_subscribe_event,
 	.vidioc_unsubscribe_event = v4l2_event_unsubscribe,
 
 	.vidioc_streamon = v4l2_m2m_ioctl_streamon,
@@ -1059,6 +1136,10 @@ static int hivdec_init_ctrls(struct hivdec_ctx *ctx)
 
 			if (!cfg.ops)
 				cfg.ops = &hivdec_ctrl_ops;
+			if (expose_10bit && cfg.id == V4L2_CID_MPEG_VIDEO_HEVC_PROFILE)
+				cfg.menu_skip_mask &= ~BIT(V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_10);
+			if (expose_10bit && cfg.id == V4L2_CID_MPEG_VIDEO_VP9_PROFILE)
+				cfg.menu_skip_mask &= ~BIT(V4L2_MPEG_VIDEO_VP9_PROFILE_2);
 			v4l2_ctrl_new_custom(&ctx->ctrl_hdl, &cfg, ctx);
 			if (ctx->ctrl_hdl.error) {
 				ret = ctx->ctrl_hdl.error;
