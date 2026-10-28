@@ -67,6 +67,32 @@ MK=(make -C "$TREE" O="$OBJ" -j"$JOBS" CC="$CC" LOCALVERSION="${NAME:+-$NAME}")
 	"$TREE"/l410/configs/*.config "${FRAGS[@]}" > "$OUT/merge.log"
 "${MK[@]}" -s olddefconfig
 
+# The fragments are curated for this kernel: a symbol that olddefconfig silently
+# drops is a build error, not something to find out on the machine.  The usual
+# victim is CONFIG_SCHED_CLASS_EXT: it depends on CONFIG_DEBUG_INFO_BTF, which
+# needs pahole >= 1.16, so a build host without dwarves quietly produces a kernel
+# with sched_ext (and therefore scx_lavd) disabled.
+missing=
+for f in "$TREE"/l410/configs/*.config "${FRAGS[@]}"; do
+	while read -r sym val; do
+		case $sym in CONFIG_*) ;; *) continue ;; esac
+		case $val in
+		y) grep -qx "$sym=y" "$OBJ/.config" || missing="$missing $sym=y" ;;
+		m) grep -qxE "$sym=(m|y)" "$OBJ/.config" || missing="$missing $sym=m" ;;
+		esac
+	done < <(grep -E '^CONFIG_[A-Za-z0-9_]+=[ym]$' "$f" || true)
+done
+if [ -n "$missing" ]; then
+	echo "olddefconfig dropped config symbols from the fragments:" >&2
+	for m in $missing; do echo "  $m" >&2; done
+	case $missing in
+	*DEBUG_INFO_BTF*|*SCHED_CLASS_EXT*)
+		echo "hint: pahole (dwarves >= 1.16) is needed for CONFIG_DEBUG_INFO_BTF;" \
+		     "without it sched_ext/scx_lavd disappears" >&2 ;;
+	esac
+	exit 1
+fi
+
 "${MK[@]}" Image $([ $MODULES = 1 ] && echo modules)
 KVER=$(cat "$OBJ/include/config/kernel.release")
 cp "$OBJ/arch/arm64/boot/Image" "$B/Image"
