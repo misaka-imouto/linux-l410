@@ -929,9 +929,15 @@ static int i2c_hid_fetch_hid_descriptor(struct i2c_hid *ihid)
 				break;
 		}
 		if (error) {
-			dev_err(&ihid->client->dev,
-				"failed to fetch HID descriptor: %d\n",
-				error);
+			/*
+			 * The L410 device tree carries one i2c-hid node per
+			 * touchpad model and only one of them is populated, so
+			 * a NAK here is expected on every boot; keep it out of
+			 * the error log.
+			 */
+			dev_info(&ihid->client->dev,
+				 "failed to fetch HID descriptor: %d\n",
+				 error);
 			return -ENODEV;
 		}
 	}
@@ -1061,7 +1067,6 @@ static int __i2c_hid_core_probe(struct i2c_hid *ihid)
 {
 	struct i2c_client *client = ihid->client;
 	struct hid_device *hid = ihid->hid;
-	bool probed;
 	int ret;
 
 	/*
@@ -1071,8 +1076,7 @@ static int __i2c_hid_core_probe(struct i2c_hid *ihid)
 	 * 27C6:01E0, does exactly that).  Do not treat it as fatal; the
 	 * descriptor read below is what decides whether a device is there.
 	 */
-	probed = i2c_hid_probe_address(ihid) == 0;
-	if (!probed)
+	if (i2c_hid_probe_address(ihid) < 0)
 		i2c_hid_dbg(ihid, "no answer to the address probe, trying the descriptor\n");
 
 	ret = i2c_hid_fetch_hid_descriptor(ihid);
@@ -1086,10 +1090,12 @@ static int __i2c_hid_core_probe(struct i2c_hid *ihid)
 		ret = i2c_hid_fetch_hid_descriptor(ihid);
 	}
 	if (ret < 0) {
-		/* keep the boot log clean for DT nodes of parts this unit lacks */
-		if (probed)
-			dev_err(&client->dev,
-				"Failed to fetch the HID Descriptor\n");
+		/*
+		 * The L410 device tree carries one node per touchpad model and
+		 * only one of them is populated, so this is the normal outcome
+		 * for the other one: keep it out of the error log.
+		 */
+		dev_info(&client->dev, "no device at this address (%d)\n", ret);
 		return ret;
 	}
 
