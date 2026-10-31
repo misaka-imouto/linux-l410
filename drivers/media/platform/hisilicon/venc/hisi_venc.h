@@ -123,6 +123,7 @@ struct hivenc_ctx {
 	bool has_ref;
 
 	u32 frame_count;
+	bool power_cycled;
 	u32 gop_size;
 	u32 bitrate;
 	u32 qp;

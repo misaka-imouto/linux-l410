@@ -67,6 +67,16 @@ static bool no_start;
 module_param(no_start, bool, 0644);
 MODULE_PARM_DESC(no_start, "program the VEDU but do not kick it");
 
+/*
+ * The vendor HAL sets encode_info->is_reset on the first frame, which makes the
+ * vendor driver power the core off and on again before it programs the
+ * registers (venc_regulator_reset()).  The 6.18 driver only powers up once at
+ * probe.  Try doing the same power cycle before the first frame.
+ */
+static bool power_cycle;
+module_param(power_cycle, bool, 0644);
+MODULE_PARM_DESC(power_cycle, "power-cycle the VEDU core before the first frame (tried, no effect)");
+
 /* ------------------------------------------------------------------ formats */
 
 static const u32 hivenc_raw_fmts[] = {
@@ -616,6 +626,13 @@ static void hivenc_device_run(void *priv)
 		return;
 	}
 
+	if (power_cycle && !ctx->power_cycled) {
+		dev_info(venc->dev, "power-cycling the VEDU core before the first frame\n");
+		hivenc_power_off(venc);
+		hivenc_power_on(venc);
+		ctx->power_cycled = true;
+	}
+
 	if (skip_regs) {
 		dev_warn(venc->dev, "skip_regs: powered on and SMMU programmed only\n");
 		schedule_delayed_work(&venc->watchdog_work, msecs_to_jiffies(500));
@@ -796,9 +813,12 @@ static void hivenc_device_run(void *priv)
 	}
 
 	dev_info_ratelimited(venc->dev,
-		"start: mode %#x size %ux%u src %#llx rec %#llx strm %#llx mstr40 %#x intstat %#x\n",
+		"start: mode %#x size %ux%u picsize %#x src %#llx rec %#llx strm %#llx stride %#x fmt %#x mstr40 %#x intstat %#x\n",
 		vedu_read(venc, VEDU_REG_VEDU_VCPI_MODE), width, height,
+		vedu_read(venc, VEDU_REG_VEDU_VCPI_PICSIZE_PIX),
 		src_y_iova, rec_y_iova, strm_iova,
+		vedu_read(venc, VEDU_REG_VEDU_VCPI_STRIDE),
+		vedu_read(venc, VEDU_REG_VEDU_VCPI_STRFMT),
 		vedu_read(venc, SMMU_MSTR_DEBUG(0x40)),
 		vedu_read(venc, VEDU_REG_FUNC_VCPI_INTSTAT));
 	schedule_delayed_work(&venc->watchdog_work, msecs_to_jiffies(500));
