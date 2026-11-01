@@ -662,4 +662,13 @@ source "drivers/misc/keba/Kconfig"
 source "drivers/misc/amd-sbi/Kconfig"
 source "drivers/misc/rp1/Kconfig"
 source "drivers/misc/huawei-fingerprint/Kconfig"
+
+config HISI_JPEGENC
+	tristate "HiSilicon Kirin 990 hardware JPEG encoder (bring-up)"
+	depends on ARCH_HISI || COMPILE_TEST
+	help
+	  Minimal probe for the JPGENC block at 0xE8000000.  Powers the ISP
+	  subsystem, enables the JPEG clocks and checks that the register file
+	  answers writes.  The camera/JPEG encoder itself is not implemented yet.
+
 endmenu

@@ -1,0 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0
+// The firmware leaves the vendor JPEG encoder node disabled.  Probe it and
+// give the driver the media1 AXI/APB gates; clk_jpg_func comes from the node.
+&{/huawei,hjpeg} {
+	status = "okay";
+	clocks = <&{/clocks@0/clk_jpg_func}
+		  &{/clocks@0/media1_crgctrl@0xE8601000/aclk_jpg}
+		  &{/clocks@0/media1_crgctrl@0xE8601000/pclk_jpg}>;
+	clock-names = "clk_jpg_func", "aclk_jpg", "pclk_jpg";
+};

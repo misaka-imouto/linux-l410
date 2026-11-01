@@ -76,3 +76,4 @@ obj-y				+= keba/
 obj-y				+= amd-sbi/
 obj-$(CONFIG_MISC_RP1)		+= rp1/
 obj-$(CONFIG_HUAWEI_FINGERPRINT)	+= huawei-fingerprint/
+obj-$(CONFIG_HISI_JPEGENC)	+= hisi-jpegenc.o
