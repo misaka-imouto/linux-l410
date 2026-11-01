@@ -111,6 +111,9 @@ MODULE_PARM_DESC(sync_cfg, "JPGENC_SYNCCFG value (source bit0, sram_noopt bit2)"
 static uint jpeg_config;
 module_param(jpeg_config, uint, 0644);
 MODULE_PARM_DESC(jpeg_config, "JPGENC_JPE_CONFIG_REG value");
+static uint sweep;
+module_param(sweep, uint, 0644);
+MODULE_PARM_DESC(sweep, "0=off, 1=single-bit, 2=pairwise-in-register, 3=both");
 
 static const struct of_device_id hisi_jpegenc_of_match[] = {
 	{ .compatible = "huawei,hjpeg" },
@@ -254,6 +257,211 @@ static void cvdr_rd_config(struct hisi_jpegenc *j)
 
 	/* four access limiters = 0x0f, reload = 0x0f */
 	writel(0x0fffffff, j->cvdr + CVDR_NR_RD_LIMIT_4);
+}
+
+
+/* ------------------------------------------------------------------ sweep */
+
+static u32 frame_hash(const u8 *out, u32 byte_cnt)
+{
+	u32 h = 2166136261u;
+	u32 n = min_t(u32, byte_cnt, 512);
+	u32 i;
+
+	for (i = 0; i < n; i++)
+		h = (h ^ out[JPGENC_HEAD_SIZE + i]) * 16777619u;
+	return h;
+}
+
+static u32 run_frame(struct hisi_jpegenc *j, u8 *y, u8 *uv,
+		     dma_addr_t y_dma, dma_addr_t uv_dma,
+		     u8 *out, u32 width, u32 height, bool flat,
+		     u32 *byte_cnt)
+{
+	u32 y_size = width * height;
+	u32 stride = (width >> 4) << 4;
+	u32 i, bc = 0;
+
+	if (flat)
+		memset(y, 0x80, y_size);
+	else {
+		for (i = 0; i < y_size; i++)
+			y[i] = (u8)((i % width) + (i / width));
+	}
+	memset(uv, 0x80, y_size / 2);
+
+	jw(j, JPGENC_PIC_FORMAT, 1);
+	jw(j, JPGENC_INPUT_SWAP, 0);
+	jw(j, JPGENC_HRIGHT1, (width - 1) & 0x1fff);
+	jw(j, JPGENC_VBOTTOM, (height - 1) & 0x1fff);
+	jw(j, JPGENC_HRIGHT2, 0);
+	jw(j, JPGENC_TQ_Y, 0);
+	jw(j, JPGENC_TQ_U, 1);
+	jw(j, JPGENC_TQ_V, 1);
+	jw(j, JPGENC_Y_ADDR, (u32)(y_dma >> 4));
+	jw(j, JPGENC_UV_ADDR, (u32)(uv_dma >> 4));
+	jw(j, JPGENC_STRIDE, (stride >> 4) << 4);
+	jw(j, JPGENC_PREREAD, 4);
+	jw(j, JPGENC_ENCODE, 1);
+	jw(j, JPGENC_INIT, 1);
+
+	for (i = 0; i < 50; i++) {
+		bc = jr(j, JPGENC_BYTE_CNT);
+		if (bc)
+			break;
+		usleep_range(500, 1000);
+	}
+	*byte_cnt = bc;
+	return frame_hash(out, bc);
+}
+
+static bool sweep_skip(u32 reg)
+{
+	switch (reg) {
+	case 0x04:	/* encode */
+	case 0x08:	/* init */
+	case 0x3c:	/* table data */
+	case 0x40:	/* table id */
+	case 0x44:
+	case 0x48:
+	case 0x4c:
+	case 0x50:	/* table lengths */
+	case 0x6c:
+	case 0x70:
+	case 0x74:
+	case 0x78:
+	case 0x7c:
+	case 0x80:
+	case 0x84:
+	case 0x88:
+	case 0x8c:	/* interrupt/status */
+	case 0x94:
+	case 0x98:
+	case 0x9c:	/* input addresses/stride */
+	case 0xfc:	/* state */
+	case 0x108:	/* byte count */
+	case 0x130:	/* force clock on */
+		return true;
+	}
+	return false;
+}
+
+static const u32 pair_regs[] = {
+	0x00, 0x0c, 0x14, 0x18, 0x20, 0x24, 0x28, 0x2c, 0x30, 0x34, 0x38,
+	0x60, 0x64, 0x90, 0x100, 0x104, 0x10c, 0x120, 0x124, 0x128, 0x12c,
+};
+
+static void sweep_probe(struct hisi_jpegenc *j, u32 reg, u32 old, u32 val,
+			u32 b1, u32 b2, u32 h1, u32 h2)
+{
+	dev_warn(j->dev,
+		 "SWEEP HIT reg %#04x %#x -> %#x: grad %u/%08x flat %u/%08x\n",
+		 reg, old, val, b1, h1, b2, h2);
+}
+
+static int sweep_run(struct hisi_jpegenc *j, u32 width, u32 height)
+{
+	u32 y_size = width * height;
+	u32 uv_size = y_size / 2;
+	u8 *yuv, *out;
+	dma_addr_t yuv_dma, out_dma;
+	u32 b0, b1, h0, h1;
+	u32 reg, bit, a, b;
+	u32 hits = 0, runs = 0;
+	int ret;
+
+	ret = dma_set_mask_and_coherent(j->dev, DMA_BIT_MASK(32));
+	if (ret)
+		return ret;
+
+	yuv = dma_alloc_coherent(j->dev, y_size + uv_size, &yuv_dma, GFP_KERNEL);
+	out = dma_alloc_coherent(j->dev, JPGENC_OUT_SIZE, &out_dma, GFP_KERNEL);
+	if (!yuv || !out) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	smmu_bypass(j);
+	cvdr_config(j, out_dma, JPGENC_OUT_SIZE, width, height);
+	cvdr_rd_config(j);
+	hw_init(j);
+
+	/* baseline: the input path is still broken, so these should match */
+	h0 = run_frame(j, yuv, yuv + y_size, yuv_dma, yuv_dma + y_size,
+		       out, width, height, false, &b0);
+	h1 = run_frame(j, yuv, yuv + y_size, yuv_dma, yuv_dma + y_size,
+		       out, width, height, true, &b1);
+	dev_info(j->dev, "sweep baseline: grad %u/%08x flat %u/%08x%s\n",
+		 b0, h0, b1, h1, (h0 != h1 || b0 != b1) ? " (already differs!)" : "");
+
+	if (sweep & 1) {
+		for (reg = 0; reg <= 0x130; reg += 4) {
+			u32 save = jr(j, reg);
+
+			if (sweep_skip(reg))
+				continue;
+			for (bit = 0; bit < 32; bit++) {
+				u32 val = save ^ BIT(bit);
+				u32 gb, fb, gh, fh;
+
+				jw(j, reg, val);
+				gh = run_frame(j, yuv, yuv + y_size, yuv_dma,
+					       yuv_dma + y_size, out, width,
+					       height, false, &gb);
+				fh = run_frame(j, yuv, yuv + y_size, yuv_dma,
+					       yuv_dma + y_size, out, width,
+					       height, true, &fb);
+				runs += 2;
+				if (gh != fh || gb != fb) {
+					sweep_probe(j, reg, save, val,
+						    gb, fb, gh, fh);
+					hits++;
+				}
+			}
+			jw(j, reg, save);
+		}
+	}
+
+	if (sweep & 2) {
+		hw_init(j);
+		for (reg = 0; reg < ARRAY_SIZE(pair_regs); reg++) {
+			u32 save = jr(j, pair_regs[reg]);
+
+			for (a = 0; a < 32; a++) {
+				for (b = a + 1; b < 32; b++) {
+					u32 val = save ^ BIT(a) ^ BIT(b);
+					u32 gb, fb, gh, fh;
+
+					jw(j, pair_regs[reg], val);
+					gh = run_frame(j, yuv, yuv + y_size,
+						       yuv_dma, yuv_dma + y_size,
+						       out, width, height,
+						       false, &gb);
+					fh = run_frame(j, yuv, yuv + y_size,
+						       yuv_dma, yuv_dma + y_size,
+						       out, width, height,
+						       true, &fb);
+					runs += 2;
+					if (gh != fh || gb != fb) {
+						sweep_probe(j, pair_regs[reg],
+							    save, val, gb, fb,
+							    gh, fh);
+						hits++;
+					}
+				}
+			}
+			jw(j, pair_regs[reg], save);
+		}
+	}
+
+	dev_info(j->dev, "sweep done: %u frames, %u hits\n", runs, hits);
+	ret = 0;
+out:
+	if (out)
+		dma_free_coherent(j->dev, JPGENC_OUT_SIZE, out, out_dma);
+	if (yuv)
+		dma_free_coherent(j->dev, y_size + uv_size, yuv, yuv_dma);
+	return ret;
 }
 
 static int encode_test(struct hisi_jpegenc *j, u32 width, u32 height)
@@ -530,6 +738,11 @@ static int hisi_jpegenc_probe(struct platform_device *pdev)
 	ret = hisi_jpegenc_power_on(j);
 	if (ret) {
 		dev_warn(&pdev->dev, "power-on/register test failed: %d\n", ret);
+		return 0;
+	}
+
+	if (sweep) {
+		sweep_run(j, 320, 240);
 		return 0;
 	}
 
