@@ -105,6 +105,12 @@ MODULE_PARM_DESC(test, "run one 320x240 NV12 encode at probe");
 static bool flat;
 module_param(flat, bool, 0644);
 MODULE_PARM_DESC(flat, "fill the test frame with constant 128 instead of a gradient");
+static uint sync_cfg = 0x5;
+module_param(sync_cfg, uint, 0644);
+MODULE_PARM_DESC(sync_cfg, "JPGENC_SYNCCFG value (source bit0, sram_noopt bit2)");
+static uint jpeg_config;
+module_param(jpeg_config, uint, 0644);
+MODULE_PARM_DESC(jpeg_config, "JPGENC_JPE_CONFIG_REG value");
 
 static const struct of_device_id hisi_jpegenc_of_match[] = {
 	{ .compatible = "huawei,hjpeg" },
@@ -173,24 +179,43 @@ static void hw_init(struct hisi_jpegenc *j)
 	qtable_init(j);
 	jw(j, JPGENC_PREFETCH, 0);		/* smmu bypass: no prefetch */
 	jw(j, JPGENC_RESTART, 0);
-	jw(j, JPGENC_SYNCCFG, BIT(0) | BIT(2));	/* source = external, sram noopt */
+	jw(j, JPGENC_SYNCCFG, sync_cfg);
+	jw(j, 0x90, jpeg_config);
 }
 
 static void smmu_bypass(struct hisi_jpegenc *j)
 {
+	u32 scr, fama;
 	int i;
 
 	if (!j->smmu)
 		return;
-	/* global bypass plus the three JPEG stream IDs, like the vendor driver */
-	writel(readl(j->smmu + SMMU_GLOBAL_BYPASS) | BIT(0),
-	       j->smmu + SMMU_GLOBAL_BYPASS);
+
+	/*
+	 * Match the vendor do_cfg_smmu() bypass path: keep global translation
+	 * on (glb_bypass = 0), enable per-SID bypass for the three JPEG stream
+	 * IDs, then program the FAMA bypass high bits.  Setting the global
+	 * bypass bit alone left the JPGENC reading a fixed address.
+	 */
+	scr = readl(j->smmu + SMMU_GLOBAL_BYPASS);
+	scr &= ~BIT(0);
+	scr &= ~(0xf << 16);
+	scr |= (5 << 16);		/* ptw_pf, huawei,qos_update = 1 */
+	scr &= ~(0x3f << 20);
+	scr |= (0x1d << 20);		/* ptw_mid */
+	writel(scr, j->smmu + SMMU_GLOBAL_BYPASS);
+
 	for (i = 0; i < 3; i++) {
 		u32 id = (i == 0) ? 0 : (i == 1) ? 4 : 5;
 
 		writel(readl(j->smmu + SMMU_SMRX_NS(id)) | BIT(0),
 		       j->smmu + SMMU_SMRX_NS(id));
 	}
+
+	/* FAMA_CTRL1_NS bits 8..13: bypass MSB (buffers are below 4 GB) */
+	fama = readl(j->smmu + 0x224);
+	fama &= ~(0x3f << 8);
+	writel(fama, j->smmu + 0x224);
 }
 
 static void cvdr_config(struct hisi_jpegenc *j, dma_addr_t out, u32 out_size,
@@ -428,6 +453,22 @@ static int hisi_jpegenc_raw_show(struct seq_file *m, void *unused)
 }
 DEFINE_SHOW_ATTRIBUTE(hisi_jpegenc_raw);
 
+static int hisi_jpegenc_head_show(struct seq_file *m, void *unused)
+{
+	struct hisi_jpegenc *j = m->private;
+	u32 i;
+
+	if (!j->have_image) {
+		seq_puts(m, "no image\n");
+		return 0;
+	}
+	for (i = 0; i < 128; i++)
+		seq_printf(m, "%02x", j->out[i]);
+	seq_putc(m, '\n');
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(hisi_jpegenc_head);
+
 static int hisi_jpegenc_probe(struct platform_device *pdev)
 {
 	struct hisi_jpegenc *j;
@@ -478,6 +519,8 @@ static int hisi_jpegenc_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, j);
 	j->dbg = debugfs_create_file("hisi-jpegenc", 0444, NULL, j,
 				     &hisi_jpegenc_raw_fops);
+	debugfs_create_file("hisi-jpegenc-head", 0444, NULL, j,
+			    &hisi_jpegenc_head_fops);
 
 	if (!do_probe) {
 		dev_info(&pdev->dev, "do_probe=0: resources mapped only\n");
