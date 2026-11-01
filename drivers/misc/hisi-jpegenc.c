@@ -117,6 +117,12 @@ MODULE_PARM_DESC(sweep, "0=off, 1=single-bit, 2=pairwise, 4=16-bit values (or th
 static uint sweep_reg = 0xffffffff;
 module_param(sweep_reg, uint, 0644);
 MODULE_PARM_DESC(sweep_reg, "limit the value sweep to one register offset");
+static uint cvdr_start;
+module_param(cvdr_start, uint, 0644);
+MODULE_PARM_DESC(cvdr_start, "first CVDR offset for sweep=8");
+static uint cvdr_end = 0x200;
+module_param(cvdr_end, uint, 0644);
+MODULE_PARM_DESC(cvdr_end, "last CVDR offset for sweep=8");
 
 static const struct of_device_id hisi_jpegenc_of_match[] = {
 	{ .compatible = "huawei,hjpeg" },
@@ -268,7 +274,7 @@ static void cvdr_rd_config(struct hisi_jpegenc *j)
 static u32 frame_hash(const u8 *out, u32 byte_cnt)
 {
 	u32 h = 2166136261u;
-	u32 n = min_t(u32, byte_cnt, 512);
+	u32 n = min_t(u32, byte_cnt, 4096);
 	u32 i;
 
 	for (i = 0; i < n; i++)
@@ -285,6 +291,8 @@ static u32 run_frame(struct hisi_jpegenc *j, u8 *y, u8 *uv,
 	u32 stride = (width >> 4) << 4;
 	u32 i, bc = 0;
 
+	/* stale bytes at +640 would make an output-offset change look like a hit */
+	memset(out + JPGENC_HEAD_SIZE, 0, 4096);
 	if (flat)
 		memset(y, 0x80, y_size);
 	else {
@@ -495,6 +503,42 @@ static int sweep_run(struct hisi_jpegenc *j, u32 width, u32 height)
 			jw(j, r, save);
 			dev_info(j->dev, "value sweep reg %#04x done\n", r);
 		}
+	}
+
+	if (sweep & 8) {
+		u32 r;
+
+		if (cvdr_end > 0x1ffc)
+			cvdr_end = 0x1ffc;
+		cvdr_start &= ~3u;
+		hw_init(j);
+		dev_info(j->dev, "cvdr sweep %#x-%#x\n", cvdr_start, cvdr_end);
+		for (r = cvdr_start; r <= cvdr_end; r += 4) {
+			u32 save = readl(j->cvdr + r);
+			u32 bit;
+
+			for (bit = 0; bit < 32; bit++) {
+				u32 val = save ^ BIT(bit);
+				u32 gb, fb, gh, fh;
+
+				writel(val, j->cvdr + r);
+				gh = run_frame(j, yuv, yuv + y_size, yuv_dma,
+					       yuv_dma + y_size, out, width,
+					       height, false, &gb);
+				fh = run_frame(j, yuv, yuv + y_size, yuv_dma,
+					       yuv_dma + y_size, out, width,
+					       height, true, &fb);
+				runs += 2;
+				if (gh != fh || gb != fb) {
+					sweep_probe(j, r, save, val, gb, fb,
+						    gh, fh);
+					hits++;
+				}
+			}
+			writel(save, j->cvdr + r);
+		}
+		dev_info(j->dev, "cvdr sweep %#x-%#x done\n",
+			 cvdr_start, cvdr_end);
 	}
 
 	dev_info(j->dev, "sweep done: %u frames, %u hits\n", runs, hits);
