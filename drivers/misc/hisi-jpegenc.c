@@ -113,7 +113,10 @@ module_param(jpeg_config, uint, 0644);
 MODULE_PARM_DESC(jpeg_config, "JPGENC_JPE_CONFIG_REG value");
 static uint sweep;
 module_param(sweep, uint, 0644);
-MODULE_PARM_DESC(sweep, "0=off, 1=single-bit, 2=pairwise-in-register, 3=both");
+MODULE_PARM_DESC(sweep, "0=off, 1=single-bit, 2=pairwise, 4=16-bit values (or them)");
+static uint sweep_reg = 0xffffffff;
+module_param(sweep_reg, uint, 0644);
+MODULE_PARM_DESC(sweep_reg, "limit the value sweep to one register offset");
 
 static const struct of_device_id hisi_jpegenc_of_match[] = {
 	{ .compatible = "huawei,hjpeg" },
@@ -305,11 +308,11 @@ static u32 run_frame(struct hisi_jpegenc *j, u8 *y, u8 *uv,
 	jw(j, JPGENC_ENCODE, 1);
 	jw(j, JPGENC_INIT, 1);
 
-	for (i = 0; i < 50; i++) {
+	for (i = 0; i < 20; i++) {
 		bc = jr(j, JPGENC_BYTE_CNT);
 		if (bc)
 			break;
-		usleep_range(500, 1000);
+		usleep_range(250, 500);
 	}
 	*byte_cnt = bc;
 	return frame_hash(out, bc);
@@ -451,6 +454,46 @@ static int sweep_run(struct hisi_jpegenc *j, u32 width, u32 height)
 				}
 			}
 			jw(j, pair_regs[reg], save);
+		}
+	}
+
+	if (sweep & 4) {
+		static const u32 value_regs[] = {
+			0x00, 0x0c, 0x14, 0x18, 0x1c, 0x20, 0x24, 0x28, 0x2c,
+			0x30, 0x34, 0x38, 0x60, 0x64, 0x90, 0x100, 0x104,
+			0x10c, 0x120, 0x124, 0x128, 0x12c,
+		};
+		u32 ri;
+
+		hw_init(j);
+		for (ri = 0; ri < ARRAY_SIZE(value_regs); ri++) {
+			u32 r = value_regs[ri];
+			u32 save = jr(j, r);
+			u32 v;
+
+			if (sweep_reg != 0xffffffff && r != sweep_reg)
+				continue;
+			dev_info(j->dev, "value sweep reg %#04x (save %#x)\n",
+				 r, save);
+			for (v = 0; v <= 0xffff; v++) {
+				u32 gb, fb, gh, fh;
+
+				jw(j, r, v);
+				gh = run_frame(j, yuv, yuv + y_size, yuv_dma,
+					       yuv_dma + y_size, out, width,
+					       height, false, &gb);
+				fh = run_frame(j, yuv, yuv + y_size, yuv_dma,
+					       yuv_dma + y_size, out, width,
+					       height, true, &fb);
+				runs += 2;
+				if (gh != fh || gb != fb) {
+					sweep_probe(j, r, save, v, gb, fb,
+						    gh, fh);
+					hits++;
+				}
+			}
+			jw(j, r, save);
+			dev_info(j->dev, "value sweep reg %#04x done\n", r);
 		}
 	}
 
