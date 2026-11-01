@@ -77,6 +77,35 @@ static bool power_cycle;
 module_param(power_cycle, bool, 0644);
 MODULE_PARM_DESC(power_cycle, "power-cycle the VEDU core before the first frame (tried, no effect)");
 
+/*
+ * The CRG has separate power/isolation bits for VENC.  The ATF ip-regulator
+ * call may only switch the power domain; if the core stays isolated, the
+ * register file is reachable but the pipeline never runs.  Read the status and
+ * optionally request power + deassert isolation.
+ */
+static bool crg_fix;
+module_param(crg_fix, bool, 0644);
+MODULE_PARM_DESC(crg_fix, "set PERPWREN and ISODIS for VENC in the CRG");
+
+/* Cycle the CRG power switch itself (PERPWRDIS -> PERPWREN -> ISODIS). */
+static bool crg_reset;
+module_param(crg_reset, bool, 0644);
+MODULE_PARM_DESC(crg_reset, "hard power-cycle VENC through the CRG before enabling clocks (hard-resets this board)");
+
+#define VENC_CRG_BASE		0xfff05000
+#define VENC_CRG_ISOEN		0x144
+#define VENC_CRG_ISODIS		0x148
+#define VENC_CRG_ISOSTAT	0x14c
+#define VENC_CRG_PERPWREN	0x150
+#define VENC_CRG_PERPWRSTAT	0x158
+#define VENC_CRG_PERPWRACK	0x15c
+#define VENC_CRG_PERPWRDIS	0x154
+#define VENC_CRG_PERI_STAT2	0x118
+#define VENC_CRG_PWR_BIT	BIT(1)	/* vencpwren / venc_iso_en */
+
+#define VENC_MEDIA2_CRG_BASE	0xe9300000
+#define VENC_MEDIA2_ATDIV_BIT	BIT(13)	/* clk_atdiv_venc gate */
+
 /* ------------------------------------------------------------------ formats */
 
 static const u32 hivenc_raw_fmts[] = {
@@ -300,6 +329,54 @@ static int hivenc_power_on(struct hivenc_dev *venc)
 	if (ret)
 		goto err_clk;
 
+	if (venc->crg) {
+		u32 iso_en = readl(venc->crg + VENC_CRG_ISOEN);
+		u32 iso_stat = readl(venc->crg + VENC_CRG_ISOSTAT);
+		u32 pwren = readl(venc->crg + VENC_CRG_PERPWREN);
+		u32 pwstat = readl(venc->crg + VENC_CRG_PERPWRSTAT);
+
+		dev_info(venc->dev,
+			 "CRG before: PERPWREN %#x PERPWRSTAT %#x ISOEN %#x ISOSTAT %#x ACK %#x STAT2 %#x\n",
+			 pwren, pwstat, iso_en, iso_stat,
+			 readl(venc->crg + VENC_CRG_PERPWRACK),
+			 readl(venc->crg + VENC_CRG_PERI_STAT2));
+		if (venc->m2crg) {
+			u32 m2 = readl(venc->m2crg);
+
+			dev_info(venc->dev, "media2 CRG 0x00 %#x (atdiv_venc %s)\n",
+				 m2, (m2 & VENC_MEDIA2_ATDIV_BIT) ? "on" : "off");
+
+		}
+		if (crg_reset) {
+			dev_info(venc->dev, "CRG reset: PERPWRDIS/PERPWREN/ISODIS\n");
+			writel(VENC_CRG_PWR_BIT, venc->crg + VENC_CRG_PERPWRDIS);
+			usleep_range(1000, 2000);
+			writel(VENC_CRG_PWR_BIT, venc->crg + VENC_CRG_PERPWREN);
+			writel(VENC_CRG_PWR_BIT, venc->crg + VENC_CRG_ISODIS);
+			usleep_range(1000, 2000);
+			dev_info(venc->dev,
+				 "CRG reset done: PERPWRSTAT %#x ACK %#x ISOSTAT %#x\n",
+				 readl(venc->crg + VENC_CRG_PERPWRSTAT),
+				 readl(venc->crg + VENC_CRG_PERPWRACK),
+				 readl(venc->crg + VENC_CRG_ISOSTAT));
+		}
+		if (crg_fix) {
+			writel(readl(venc->crg + VENC_CRG_PERPWREN) |
+			       VENC_CRG_PWR_BIT,
+			       venc->crg + VENC_CRG_PERPWREN);
+			writel(readl(venc->crg + VENC_CRG_ISODIS) |
+			       VENC_CRG_PWR_BIT,
+			       venc->crg + VENC_CRG_ISODIS);
+			usleep_range(1000, 2000);
+			dev_info(venc->dev,
+				 "CRG after: PERPWREN %#x PERPWRSTAT %#x ISOEN %#x ISOSTAT %#x\n",
+				 readl(venc->crg + VENC_CRG_PERPWREN),
+				 readl(venc->crg + VENC_CRG_PERPWRSTAT),
+				 readl(venc->crg + VENC_CRG_ISOEN),
+				 readl(venc->crg + VENC_CRG_ISOSTAT));
+		}
+	}
+
 	if (venc->venc1_supply)
 		regulator_enable(venc->venc1_supply);
 	if (venc->clk1) {
@@ -316,6 +393,12 @@ static int hivenc_power_on(struct hivenc_dev *venc)
 	clk_prepare_enable(venc->aclk);
 	clk_prepare_enable(venc->pclk);
 	clk_prepare_enable(venc->clkfreq);
+	if (venc->clk_atdiv) {
+		int ar = clk_prepare_enable(venc->clk_atdiv);
+
+		dev_info(venc->dev, "clk_atdiv_venc enable %d rate %lu\n",
+			 ar, clk_get_rate(venc->clk_atdiv));
+	}
 
 	if (level != 3) {
 		ret = clk_set_rate(venc->clk, venc->clk_rate[level]);
@@ -323,6 +406,10 @@ static int hivenc_power_on(struct hivenc_dev *venc)
 			dev_warn(venc->dev, "clock rate %u failed: %d\n",
 				 venc->clk_rate[level], ret);
 	}
+	dev_info(venc->dev, "clocks: venc %lu freq %lu atdiv %lu\n",
+		 clk_get_rate(venc->clk),
+		 venc->clkfreq ? clk_get_rate(venc->clkfreq) : 0,
+		 venc->clk_atdiv ? clk_get_rate(venc->clk_atdiv) : 0);
 
 	venc->powered = true;
 	hivenc_mmu_hw_setup(venc);
@@ -337,6 +424,12 @@ static int hivenc_power_on(struct hivenc_dev *venc)
 	/* is the block really clocked and decoding our writes? */
 	vedu_write(venc, VEDU_REG_VEDU_VCPI_FRAMENO, 0x12345678);
 	ret = vedu_read(venc, VEDU_REG_VEDU_VCPI_FRAMENO);
+	vedu_write(venc, VEDU_REG_VEDU_BUS_IDLE_REQ, 1);
+	udelay(50);
+	dev_info(venc->dev, "VEDU bus idle flag %#x (req set)\n",
+		 vedu_read(venc, VEDU_REG_FUNC_VCPI_BUS_IDLE_FLAG));
+	vedu_write(venc, VEDU_REG_VEDU_BUS_IDLE_REQ, 0);
+
 	dev_info(venc->dev,
 		 "VEDU probe: frameno %#x clk %u Hz gate %s aclk %s pclk %s freq %s\n",
 		 ret, clk_get_rate(venc->clk),
@@ -355,6 +448,8 @@ static void hivenc_power_off(struct hivenc_dev *venc)
 {
 	venc->powered = false;
 	vedu_write(venc, VEDU_VCPI_INTMASK, 0);
+	if (venc->clk_atdiv)
+		clk_disable_unprepare(venc->clk_atdiv);
 	clk_disable_unprepare(venc->clkfreq);
 	clk_disable_unprepare(venc->pclk);
 	clk_disable_unprepare(venc->aclk);
@@ -1369,6 +1464,15 @@ static int hivenc_probe(struct platform_device *pdev)
 		venc->regs1 = NULL;
 	venc->regs = venc->regs0;
 
+	venc->crg = devm_ioremap(dev, VENC_CRG_BASE, 0x1000);
+	if (!venc->crg)
+		dev_warn(dev, "cannot map CRG at %#x, no power/isolation diagnostics\n",
+			 VENC_CRG_BASE);
+	venc->m2crg = devm_ioremap(dev, VENC_MEDIA2_CRG_BASE, 0x1000);
+	if (!venc->m2crg)
+		dev_warn(dev, "cannot map media2 CRG at %#x\n",
+			 VENC_MEDIA2_CRG_BASE);
+
 	venc->clk = devm_clk_get(dev, "clk_venc");
 	if (IS_ERR(venc->clk))
 		return dev_err_probe(dev, PTR_ERR(venc->clk), "Failed to get clk_venc\n");
@@ -1380,6 +1484,11 @@ static int hivenc_probe(struct platform_device *pdev)
 	venc->venc_supply = devm_regulator_get(dev, "ldo_venc");
 	if (IS_ERR(venc->venc_supply))
 		return dev_err_probe(dev, PTR_ERR(venc->venc_supply), "Failed to get ldo_venc\n");
+
+	venc->clk_atdiv = devm_clk_get_optional(dev, "clk_atdiv_venc");
+	if (IS_ERR(venc->clk_atdiv))
+		return dev_err_probe(dev, PTR_ERR(venc->clk_atdiv),
+				     "Failed to get clk_atdiv_venc\n");
 
 	venc->clk_gate = devm_clk_get_optional(dev, "clkgt_venc");
 	if (IS_ERR(venc->clk_gate))

@@ -15,7 +15,8 @@
 		  &{/clocks@0/crgctrl@0xFFF05000/clkgt_venc}
 		  &{/clocks@0/media2_crgctrl@0xE9300000/aclk_venc}
 		  &{/clocks@0/media2_crgctrl@0xE9300000/pclk_venc}
-		  &{/clocks@0/media2_crgctrl@0xE9300000/clk_vencfreq}>;
+		  &{/clocks@0/media2_crgctrl@0xE9300000/clk_vencfreq}
+		  &{/clocks@0/media2_crgctrl@0xE9300000/clk_atdiv_venc}>;
 	clock-names = "clk_venc", "clk_venc1", "clkgt_venc",
-		      "aclk_venc", "pclk_venc", "clk_vencfreq";
+		      "aclk_venc", "pclk_venc", "clk_vencfreq", "clk_atdiv_venc";
 };

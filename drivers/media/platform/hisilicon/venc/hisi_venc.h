@@ -150,6 +150,9 @@ struct hivenc_dev {
 	struct clk *aclk;
 	struct clk *pclk;
 	struct clk *clkfreq;
+	struct clk *clk_atdiv;
+	void __iomem *crg;
+	void __iomem *m2crg;
 	struct regulator *venc_supply;
 	struct regulator *venc1_supply;
 	struct regulator *media_supply;
