@@ -682,6 +682,17 @@ static int hisi_jpegenc_power_on(struct hisi_jpegenc *j)
 	if (j->pclk)
 		clk_prepare_enable(j->pclk);
 
+	/*
+	 * The vendor IPP core (drivers/hisi/ipp/v250/ipp_core.c,
+	 * ipp_cfg_qos_reg) programs the JPEG CVDR RT AXI read/write flux
+	 * control here.  Without it the JPGENC register file works but the
+	 * CVDR read side never feeds the encoder.
+	 */
+	writel(0x00000000, j->subctrl + 0x80);
+	writel(0x08000105, j->subctrl + 0x84);
+	writel(0x00000000, j->subctrl + 0x88);
+	writel(0x08000085, j->subctrl + 0x8c);
+
 	before = readl(j->subctrl + clk_ctl_offset);
 	writel(before | BIT(0), j->subctrl + clk_ctl_offset);
 	after = readl(j->subctrl + clk_ctl_offset);
