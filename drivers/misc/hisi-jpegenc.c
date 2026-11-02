@@ -40,6 +40,8 @@
 #define JPGENC_TDC1_LEN		0x50
 #define JPGENC_ERROR_RIS	0x6c
 #define JPGENC_STATUS_RIS	0x80
+#define JPGENC_STATUS_ICR	0x88
+#define JPGENC_ERROR_ICR	0x74
 #define JPGENC_Y_ADDR		0x94
 #define JPGENC_UV_ADDR		0x98
 #define JPGENC_STRIDE		0x9c
@@ -111,9 +113,15 @@ MODULE_PARM_DESC(sync_cfg, "JPGENC_SYNCCFG value (source bit0, sram_noopt bit2)"
 static uint jpeg_config;
 module_param(jpeg_config, uint, 0644);
 MODULE_PARM_DESC(jpeg_config, "JPGENC_JPE_CONFIG_REG value");
+static bool seq;
+module_param(seq, bool, 0644);
+MODULE_PARM_DESC(seq, "run a G,G,F,F,G,G sequence in encode_test");
 static uint sweep;
 module_param(sweep, uint, 0644);
 MODULE_PARM_DESC(sweep, "0=off, 1=single-bit, 2=pairwise, 4=16-bit values (or them)");
+static uint sweep_max = 0xff;
+module_param(sweep_max, uint, 0644);
+MODULE_PARM_DESC(sweep_max, "last value for sweep=4 (default 0xff)");
 static uint sweep_reg = 0xffffffff;
 module_param(sweep_reg, uint, 0644);
 MODULE_PARM_DESC(sweep_reg, "limit the value sweep to one register offset");
@@ -284,8 +292,8 @@ static u32 frame_hash(const u8 *out, u32 byte_cnt)
 
 static u32 run_frame(struct hisi_jpegenc *j, u8 *y, u8 *uv,
 		     dma_addr_t y_dma, dma_addr_t uv_dma,
-		     u8 *out, u32 width, u32 height, bool flat,
-		     u32 *byte_cnt)
+		     u8 *out, dma_addr_t out_dma, u32 width, u32 height,
+		     bool flat, u32 *byte_cnt)
 {
 	u32 y_size = width * height;
 	u32 stride = (width >> 4) << 4;
@@ -301,6 +309,10 @@ static u32 run_frame(struct hisi_jpegenc *j, u8 *y, u8 *uv,
 	}
 	memset(uv, 0x80, y_size / 2);
 
+	/* the vendor re-arms the CVDR on every frame, not just at power-on */
+	cvdr_config(j, out_dma, JPGENC_OUT_SIZE, width, height);
+	cvdr_rd_config(j);
+
 	jw(j, JPGENC_PIC_FORMAT, 1);
 	jw(j, JPGENC_INPUT_SWAP, 0);
 	jw(j, JPGENC_HRIGHT1, (width - 1) & 0x1fff);
@@ -313,15 +325,30 @@ static u32 run_frame(struct hisi_jpegenc *j, u8 *y, u8 *uv,
 	jw(j, JPGENC_UV_ADDR, (u32)(uv_dma >> 4));
 	jw(j, JPGENC_STRIDE, (stride >> 4) << 4);
 	jw(j, JPGENC_PREREAD, 4);
+	/*
+	 * huawei,irq-merge = 1: ENCODE_DONE is merged into subctrl 0x118 bit1.
+	 * The mask is 0x114 (0x1d = enable) and the clear is 0x110 = bit1.
+	 * Without clearing the merged interrupt the JPGENC only encodes the
+	 * first frame after power-on; later frames read a stale byte count.
+	 */
+	writel(0x1d, j->subctrl + 0x114);
+	writel(0x2, j->subctrl + 0x110);
+	jw(j, JPGENC_STATUS_ICR, 0x30);
+	jw(j, JPGENC_ERROR_ICR, 0xff);
 	jw(j, JPGENC_ENCODE, 1);
 	jw(j, JPGENC_INIT, 1);
 
-	for (i = 0; i < 20; i++) {
-		bc = jr(j, JPGENC_BYTE_CNT);
-		if (bc)
+	for (i = 0; i < 40; i++) {
+		if (readl(j->subctrl + 0x118) & 0x2)
 			break;
-		usleep_range(250, 500);
+		if (jr(j, JPGENC_STATUS_RIS) & BIT(4))
+			break;
+		usleep_range(100, 200);
 	}
+	bc = jr(j, JPGENC_BYTE_CNT);
+	writel(0x2, j->subctrl + 0x110);
+	jw(j, JPGENC_STATUS_ICR, 0x30);
+	jw(j, JPGENC_ERROR_ICR, 0xff);
 	*byte_cnt = bc;
 	return frame_hash(out, bc);
 }
@@ -391,17 +418,22 @@ static int sweep_run(struct hisi_jpegenc *j, u32 width, u32 height)
 		ret = -ENOMEM;
 		goto out;
 	}
+	memset(out, 0, JPGENC_OUT_SIZE);
 
 	smmu_bypass(j);
 	cvdr_config(j, out_dma, JPGENC_OUT_SIZE, width, height);
 	cvdr_rd_config(j);
 	hw_init(j);
 
+	/* the first frame after power-on is a warm-up: discard it */
+	run_frame(j, yuv, yuv + y_size, yuv_dma, yuv_dma + y_size,
+		  out, out_dma, width, height, false, &b0);
+
 	/* baseline: the input path is still broken, so these should match */
 	h0 = run_frame(j, yuv, yuv + y_size, yuv_dma, yuv_dma + y_size,
-		       out, width, height, false, &b0);
+		       out, out_dma, width, height, false, &b0);
 	h1 = run_frame(j, yuv, yuv + y_size, yuv_dma, yuv_dma + y_size,
-		       out, width, height, true, &b1);
+		       out, out_dma, width, height, true, &b1);
 	dev_info(j->dev, "sweep baseline: grad %u/%08x flat %u/%08x%s\n",
 		 b0, h0, b1, h1, (h0 != h1 || b0 != b1) ? " (already differs!)" : "");
 
@@ -417,11 +449,11 @@ static int sweep_run(struct hisi_jpegenc *j, u32 width, u32 height)
 
 				jw(j, reg, val);
 				gh = run_frame(j, yuv, yuv + y_size, yuv_dma,
-					       yuv_dma + y_size, out, width,
-					       height, false, &gb);
+					       yuv_dma + y_size, out, out_dma,
+					       width, height, false, &gb);
 				fh = run_frame(j, yuv, yuv + y_size, yuv_dma,
-					       yuv_dma + y_size, out, width,
-					       height, true, &fb);
+					       yuv_dma + y_size, out, out_dma,
+					       width, height, true, &fb);
 				runs += 2;
 				if (gh != fh || gb != fb) {
 					sweep_probe(j, reg, save, val,
@@ -446,11 +478,11 @@ static int sweep_run(struct hisi_jpegenc *j, u32 width, u32 height)
 					jw(j, pair_regs[reg], val);
 					gh = run_frame(j, yuv, yuv + y_size,
 						       yuv_dma, yuv_dma + y_size,
-						       out, width, height,
+						       out, out_dma, width, height,
 						       false, &gb);
 					fh = run_frame(j, yuv, yuv + y_size,
 						       yuv_dma, yuv_dma + y_size,
-						       out, width, height,
+						       out, out_dma, width, height,
 						       true, &fb);
 					runs += 2;
 					if (gh != fh || gb != fb) {
@@ -483,16 +515,16 @@ static int sweep_run(struct hisi_jpegenc *j, u32 width, u32 height)
 				continue;
 			dev_info(j->dev, "value sweep reg %#04x (save %#x)\n",
 				 r, save);
-			for (v = 0; v <= 0xffff; v++) {
+			for (v = 0; v <= sweep_max; v++) {
 				u32 gb, fb, gh, fh;
 
 				jw(j, r, v);
 				gh = run_frame(j, yuv, yuv + y_size, yuv_dma,
-					       yuv_dma + y_size, out, width,
-					       height, false, &gb);
+					       yuv_dma + y_size, out, out_dma,
+					       width, height, false, &gb);
 				fh = run_frame(j, yuv, yuv + y_size, yuv_dma,
-					       yuv_dma + y_size, out, width,
-					       height, true, &fb);
+					       yuv_dma + y_size, out, out_dma,
+					       width, height, true, &fb);
 				runs += 2;
 				if (gh != fh || gb != fb) {
 					sweep_probe(j, r, save, v, gb, fb,
@@ -523,11 +555,11 @@ static int sweep_run(struct hisi_jpegenc *j, u32 width, u32 height)
 
 				writel(val, j->cvdr + r);
 				gh = run_frame(j, yuv, yuv + y_size, yuv_dma,
-					       yuv_dma + y_size, out, width,
-					       height, false, &gb);
+					       yuv_dma + y_size, out, out_dma,
+					       width, height, false, &gb);
 				fh = run_frame(j, yuv, yuv + y_size, yuv_dma,
-					       yuv_dma + y_size, out, width,
-					       height, true, &fb);
+					       yuv_dma + y_size, out, out_dma,
+					       width, height, true, &fb);
 				runs += 2;
 				if (gh != fh || gb != fb) {
 					sweep_probe(j, r, save, val, gb, fb,
@@ -555,11 +587,10 @@ static int encode_test(struct hisi_jpegenc *j, u32 width, u32 height)
 {
 	u32 y_size = width * height;
 	u32 uv_size = y_size / 2;
-	u8 *yuv, *y, *uv, *out;
-	dma_addr_t yuv_dma, y_dma, uv_dma, out_dma;
-	u32 stride = (width >> 4) << 4;
-	u32 i, byte_cnt = 0;
-	int ret = -ETIMEDOUT;
+	u8 *yuv, *out;
+	dma_addr_t yuv_dma, out_dma;
+	u32 bc = 0, h;
+	int ret;
 
 	ret = dma_set_mask_and_coherent(j->dev, DMA_BIT_MASK(32));
 	if (ret)
@@ -567,97 +598,54 @@ static int encode_test(struct hisi_jpegenc *j, u32 width, u32 height)
 
 	yuv = dma_alloc_coherent(j->dev, y_size + uv_size, &yuv_dma, GFP_KERNEL);
 	out = dma_alloc_coherent(j->dev, JPGENC_OUT_SIZE, &out_dma, GFP_KERNEL);
-	y = yuv;
-	uv = yuv ? yuv + y_size : NULL;
-	y_dma = yuv_dma;
-	uv_dma = yuv_dma + y_size;
 	if (!yuv || !out) {
 		ret = -ENOMEM;
-		goto free;
+		goto out;
 	}
-
-	if (flat) {
-		memset(y, 0x80, y_size);
-	} else {
-		for (i = 0; i < y_size; i++)
-			y[i] = (u8)((i % width) + (i / width));
-	}
-	memset(uv, 0x80, uv_size);
 	memset(out, 0, JPGENC_OUT_SIZE);
-
-	dev_info(j->dev, "encode %ux%u y %pad uv %pad out %pad\n",
-		 width, height, &y_dma, &uv_dma, &out_dma);
+	memset(out, 0, JPGENC_OUT_SIZE);
 
 	smmu_bypass(j);
 	cvdr_config(j, out_dma, JPGENC_OUT_SIZE, width, height);
 	cvdr_rd_config(j);
 	hw_init(j);
 
-	/* NV12 / YUV420 */
-	jw(j, JPGENC_PIC_FORMAT, 1);
-	jw(j, JPGENC_INPUT_SWAP, 0);
-	jw(j, JPGENC_HRIGHT1, (width - 1) & 0x1fff);
-	jw(j, JPGENC_VBOTTOM, (height - 1) & 0x1fff);
-	jw(j, JPGENC_HRIGHT2, 0);
-	jw(j, JPGENC_TQ_Y, 0);
-	jw(j, JPGENC_TQ_U, 1);
-	jw(j, JPGENC_TQ_V, 1);
-	jw(j, JPGENC_Y_ADDR, (u32)(y_dma >> 4));
-	jw(j, JPGENC_UV_ADDR, (u32)(uv_dma >> 4));
-	jw(j, JPGENC_STRIDE, (stride >> 4) << 4);
-	jw(j, JPGENC_PREREAD, 4);
-	jw(j, JPGENC_ENCODE, 1);
-	jw(j, JPGENC_INIT, 1);
+	if (seq) {
+		static const bool pat[] = { 0, 0, 1, 1, 0, 0 };
+		unsigned int i;
 
-	for (i = 0; i < 500; i++) {
-		byte_cnt = jr(j, JPGENC_BYTE_CNT);
-		if (byte_cnt)
-			break;
-		usleep_range(1000, 2000);
+		for (i = 0; i < ARRAY_SIZE(pat); i++) {
+			h = run_frame(j, yuv, yuv + y_size, yuv_dma,
+				      yuv_dma + y_size, out, out_dma,
+				      width, height, pat[i], &bc);
+			dev_info(j->dev,
+				 "seq %u flat=%u bytecnt %u hash %08x\n",
+				 i, pat[i], bc, h);
+		}
+	} else {
+		h = run_frame(j, yuv, yuv + y_size, yuv_dma,
+			      yuv_dma + y_size, out, out_dma, width, height,
+			      flat, &bc);
 	}
-
 	dev_info(j->dev,
-		 "encode done: bytecnt %u status %#x error %#x state %#x first %02x %02x %02x %02x\n",
-		 byte_cnt, jr(j, JPGENC_STATUS_RIS), jr(j, JPGENC_ERROR_RIS),
-		 jr(j, JPGENC_FORCE_CLK_ON),
+		 "encode done: bytecnt %u hash %08x status %#x error %#x first %02x %02x %02x %02x\n",
+		 bc, h, jr(j, JPGENC_STATUS_RIS), jr(j, JPGENC_ERROR_RIS),
 		 out[JPGENC_HEAD_SIZE], out[JPGENC_HEAD_SIZE + 1],
 		 out[JPGENC_HEAD_SIZE + 2], out[JPGENC_HEAD_SIZE + 3]);
-	dev_info(j->dev,
-		 "JPGENC: en %#x init %#x fmt %#x h %#x v %#x y %#x uv %#x stride %#x pre %#x sync %#x\n",
-		 jr(j, JPGENC_ENCODE), jr(j, JPGENC_INIT), jr(j, JPGENC_PIC_FORMAT),
-		 jr(j, JPGENC_HRIGHT1), jr(j, JPGENC_VBOTTOM), jr(j, JPGENC_Y_ADDR),
-		 jr(j, JPGENC_UV_ADDR), jr(j, JPGENC_STRIDE), jr(j, JPGENC_PREREAD),
-		 jr(j, JPGENC_SYNCCFG));
-	dev_info(j->dev,
-		 "CVDR: cfg %#x fs %#x line %#x if %#x dbg %#x/%#x\n",
-		 readl(j->cvdr + CVDR_VP_WR_CFG_25),
-		 readl(j->cvdr + CVDR_VP_WR_AXI_FS_25),
-		 readl(j->cvdr + CVDR_VP_WR_AXI_LINE_25),
-		 readl(j->cvdr + CVDR_VP_WR_IF_CFG_25),
-		 readl(j->cvdr + 0xf00), readl(j->cvdr + 0x1da4));
-	dev_info(j->dev,
-		 "CVDR rd: cfg %#x lim %#x\n",
-		 readl(j->cvdr + CVDR_NR_RD_CFG_4),
-		 readl(j->cvdr + CVDR_NR_RD_LIMIT_4));
-	dev_info(j->dev,
-		 "SMMU: bypass %#x int %#x rd %#x/%#x wr %#x/%#x msb %#x\n",
-		 readl(j->smmu + SMMU_GLOBAL_BYPASS),
-		 readl(j->smmu + 0x18),
-		 readl(j->smmu + 0x304), readl(j->smmu + 0x300),
-		 readl(j->smmu + 0x308), readl(j->smmu + 0x300),
-		 readl(j->smmu + 0x300));
-	if (byte_cnt)
-		ret = 0;
 
-free:
-	if (ret == 0) {
+	if (bc) {
 		j->out = out;
 		j->out_dma = out_dma;
 		j->out_size = JPGENC_OUT_SIZE;
-		j->byte_cnt = byte_cnt;
+		j->byte_cnt = bc;
 		j->have_image = true;
 		out = NULL;
+		ret = 0;
+	} else {
+		ret = -EIO;
 	}
+
+out:
 	if (out)
 		dma_free_coherent(j->dev, JPGENC_OUT_SIZE, out, out_dma);
 	if (yuv)
