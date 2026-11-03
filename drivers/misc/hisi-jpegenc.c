@@ -13,6 +13,9 @@
 #include <linux/delay.h>
 #include <linux/debugfs.h>
 #include <linux/dma-mapping.h>
+#include <linux/genalloc.h>
+#include <linux/io-pgtable.h>
+#include <linux/iommu.h>
 #include <linux/io.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -71,8 +74,25 @@
 #define SMMU_SMRX_NS(n)		(0x20 + 4 * (n))
 
 #define PIX_FMT_D64		0x1E
+#define JPEG_IOVA_START		0x10000000UL
+#define JPEG_IOVA_END		0xe0000000UL
 #define JPGENC_HEAD_SIZE	640
 #define JPGENC_OUT_SIZE		(512 * 1024)
+
+struct jpeg_mmu_map {
+	u64 iova;
+	size_t size;
+};
+
+struct jpeg_mmu {
+	struct io_pgtable_ops *ops;
+	struct io_pgtable_cfg cfg;
+	struct gen_pool *pool;
+	u64 ttbr;
+	void *err_va;
+	dma_addr_t err_dma;
+	bool ready;
+};
 
 struct hisi_jpegenc {
 	struct device *dev;
@@ -88,6 +108,7 @@ struct hisi_jpegenc {
 	struct clk *pclk;
 
 	bool powered;
+	struct jpeg_mmu mmu;
 
 	u8 *out;
 	dma_addr_t out_dma;
@@ -128,6 +149,9 @@ MODULE_PARM_DESC(sweep_max, "last value for sweep=4 (default 0xff)");
 static uint sweep_reg = 0xffffffff;
 module_param(sweep_reg, uint, 0644);
 MODULE_PARM_DESC(sweep_reg, "limit the value sweep to one register offset");
+static bool use_smmu;
+module_param(use_smmu, bool, 0644);
+MODULE_PARM_DESC(use_smmu, "translate JPEG buffers through the ISP SMMU page table");
 static uint cvdr_start;
 module_param(cvdr_start, uint, 0644);
 MODULE_PARM_DESC(cvdr_start, "first CVDR offset for sweep=8");
@@ -282,6 +306,141 @@ static void cvdr_rd_config(struct hisi_jpegenc *j)
 
 /* ------------------------------------------------------------------ sweep */
 
+
+/* ------------------------------------------------------------------ SMMU */
+
+static void jpeg_mmu_tlb_flush_all(void *cookie)
+{
+}
+
+static void jpeg_mmu_tlb_flush_walk(unsigned long iova, size_t size,
+				    size_t granule, void *cookie)
+{
+}
+
+static const struct iommu_flush_ops jpeg_mmu_flush_ops = {
+	.tlb_flush_all = jpeg_mmu_tlb_flush_all,
+	.tlb_flush_walk = jpeg_mmu_tlb_flush_walk,
+};
+
+static int jpeg_mmu_init(struct hisi_jpegenc *j)
+{
+	struct jpeg_mmu *m = &j->mmu;
+
+	if (m->ready)
+		return 0;
+
+	m->cfg = (struct io_pgtable_cfg) {
+		.pgsize_bitmap	= SZ_4K,
+		.ias		= 32,
+		.oas		= 40,
+		.coherent_walk	= true,
+		.tlb		= &jpeg_mmu_flush_ops,
+		.iommu_dev	= j->dev,
+		.quirks		= IO_PGTABLE_QUIRK_ARM_NS,
+	};
+	m->ops = alloc_io_pgtable_ops(ARM_32_LPAE_S1, &m->cfg, j);
+	if (!m->ops)
+		return -ENOMEM;
+
+	m->pool = gen_pool_create(PAGE_SHIFT, -1);
+	if (!m->pool)
+		goto err_ops;
+	if (gen_pool_add(m->pool, JPEG_IOVA_START, JPEG_IOVA_END - JPEG_IOVA_START, -1))
+		goto err_pool;
+
+	m->err_va = dma_alloc_coherent(j->dev, PAGE_SIZE, &m->err_dma, GFP_KERNEL);
+	if (!m->err_va)
+		goto err_pool;
+
+	m->ttbr = m->cfg.arm_lpae_s1_cfg.ttbr;
+	m->ready = true;
+	dev_info(j->dev, "SMMU page table at %#llx (err page %pad)\n",
+		 m->ttbr, &m->err_dma);
+	return 0;
+
+err_pool:
+	gen_pool_destroy(m->pool);
+	m->pool = NULL;
+err_ops:
+	free_io_pgtable_ops(m->ops);
+	m->ops = NULL;
+	return -ENOMEM;
+}
+
+static u64 jpeg_mmu_map(struct hisi_jpegenc *j, dma_addr_t phys, size_t size)
+{
+	struct jpeg_mmu *m = &j->mmu;
+	unsigned long iova;
+	size_t mapped;
+
+	size = PAGE_ALIGN(size);
+	iova = gen_pool_alloc(m->pool, size);
+	if (!iova)
+		return 0;
+	{
+		size_t got = 0;
+		int ret;
+
+		ret = m->ops->map_pages(m->ops, iova, phys, SZ_4K, size / SZ_4K,
+					IOMMU_READ | IOMMU_WRITE, GFP_KERNEL,
+					&got);
+		mapped = got;
+		if (ret || mapped != size) {
+			gen_pool_free(m->pool, iova, size);
+			return 0;
+		}
+	}
+	return iova;
+}
+
+static void jpeg_smmu_translate(struct hisi_jpegenc *j)
+{
+	u64 ttbr = j->mmu.ttbr;
+	u64 err = j->mmu.err_dma;
+	u32 scr, fama0, fama1, msb;
+	int i;
+
+	/* vendor do_cfg_smmu() non-bypass path */
+	scr = readl(j->smmu + 0x00);
+	scr &= ~BIT(0);
+	scr &= ~(0xf << 16);
+	scr |= (5 << 16);
+	scr &= ~(0x3f << 20);
+	scr |= (0x1d << 20);
+	writel(scr, j->smmu + 0x00);
+
+	writel(0xff, j->smmu + 0x1c);	/* INTCLR_NS */
+	writel(0x00, j->smmu + 0x10);	/* INTMASK_NS */
+
+	writel(lower_32_bits(ttbr), j->smmu + 0x204);
+	writel(readl(j->smmu + 0x20c) | BIT(0), j->smmu + 0x20c);
+
+	fama1 = readl(j->smmu + 0x224);
+	fama1 = (fama1 & ~0x7f) | (upper_32_bits(ttbr) & 0x7f);
+	writel(fama1, j->smmu + 0x224);
+
+	fama0 = readl(j->smmu + 0x220);
+	fama0 |= BIT(7);		/* fama_chn_sel_ns */
+	writel(fama0, j->smmu + 0x220);
+
+	writel(lower_32_bits(err), j->smmu + 0x304);
+	writel(lower_32_bits(err), j->smmu + 0x308);
+	msb = readl(j->smmu + 0x300);
+	msb &= ~(0x7f | (0x7f << 16));
+	msb |= ((upper_32_bits(err) & 0x7f) |
+		((upper_32_bits(err) & 0x7f) << 16));
+	writel(msb, j->smmu + 0x300);
+
+	/* stream 0/4/5: translation, not bypass */
+	for (i = 0; i < 3; i++) {
+		u32 id = (i == 0) ? 0 : (i == 1) ? 4 : 5;
+
+		writel(readl(j->smmu + 0x20 + id * 4) & ~BIT(0),
+		       j->smmu + 0x20 + id * 4);
+	}
+}
+
 static u32 frame_hash(const u8 *out, u32 byte_cnt)
 {
 	u32 h = 2166136261u;
@@ -411,19 +570,35 @@ static int sweep_run(struct hisi_jpegenc *j, u32 width, u32 height)
 	u32 hits = 0, runs = 0;
 	int ret;
 
-	ret = dma_set_mask_and_coherent(j->dev, DMA_BIT_MASK(32));
-	if (ret)
-		return ret;
-
-	yuv = dma_alloc_coherent(j->dev, y_size + uv_size, &yuv_dma, GFP_KERNEL);
-	out = dma_alloc_coherent(j->dev, JPGENC_OUT_SIZE, &out_dma, GFP_KERNEL);
+	yuv = alloc_pages_exact(y_size + uv_size, GFP_KERNEL | __GFP_ZERO);
+	out = alloc_pages_exact(JPGENC_OUT_SIZE, GFP_KERNEL | __GFP_ZERO);
 	if (!yuv || !out) {
 		ret = -ENOMEM;
 		goto out;
 	}
-	memset(out, 0, JPGENC_OUT_SIZE);
+	yuv_dma = virt_to_phys(yuv);
+	out_dma = virt_to_phys(out);
 
-	smmu_bypass(j);
+	dma_addr_t yuv_phys = yuv_dma, out_phys = out_dma;
+
+	if (use_smmu) {
+		u64 yi, oi;
+
+		ret = jpeg_mmu_init(j);
+		if (ret)
+			goto out;
+		yi = jpeg_mmu_map(j, yuv_phys, y_size + uv_size);
+		oi = jpeg_mmu_map(j, out_phys, JPGENC_OUT_SIZE);
+		if (!yi || !oi) {
+			ret = -ENOMEM;
+			goto out;
+		}
+		yuv_dma = yi;
+		out_dma = oi;
+		jpeg_smmu_translate(j);
+	} else {
+		smmu_bypass(j);
+	}
 	cvdr_config(j, out_dma, JPGENC_OUT_SIZE, width, height);
 	cvdr_rd_config(j);
 	hw_init(j);
@@ -580,9 +755,9 @@ static int sweep_run(struct hisi_jpegenc *j, u32 width, u32 height)
 	ret = 0;
 out:
 	if (out)
-		dma_free_coherent(j->dev, JPGENC_OUT_SIZE, out, out_dma);
+		free_pages_exact(out, JPGENC_OUT_SIZE);
 	if (yuv)
-		dma_free_coherent(j->dev, y_size + uv_size, yuv, yuv_dma);
+		free_pages_exact(yuv, y_size + uv_size);
 	return ret;
 }
 
@@ -595,20 +770,36 @@ static int encode_test(struct hisi_jpegenc *j, u32 width, u32 height)
 	u32 bc = 0, h;
 	int ret;
 
-	ret = dma_set_mask_and_coherent(j->dev, DMA_BIT_MASK(32));
-	if (ret)
-		return ret;
-
-	yuv = dma_alloc_coherent(j->dev, y_size + uv_size, &yuv_dma, GFP_KERNEL);
-	out = dma_alloc_coherent(j->dev, JPGENC_OUT_SIZE, &out_dma, GFP_KERNEL);
+	yuv = alloc_pages_exact(y_size + uv_size, GFP_KERNEL | __GFP_ZERO);
+	out = alloc_pages_exact(JPGENC_OUT_SIZE, GFP_KERNEL | __GFP_ZERO);
 	if (!yuv || !out) {
 		ret = -ENOMEM;
 		goto out;
 	}
-	memset(out, 0, JPGENC_OUT_SIZE);
+	yuv_dma = virt_to_phys(yuv);
+	out_dma = virt_to_phys(out);
 	memset(out, 0, JPGENC_OUT_SIZE);
 
-	smmu_bypass(j);
+	dma_addr_t yuv_phys = yuv_dma, out_phys = out_dma;
+
+	if (use_smmu) {
+		u64 yi, oi;
+
+		ret = jpeg_mmu_init(j);
+		if (ret)
+			goto out;
+		yi = jpeg_mmu_map(j, yuv_phys, y_size + uv_size);
+		oi = jpeg_mmu_map(j, out_phys, JPGENC_OUT_SIZE);
+		if (!yi || !oi) {
+			ret = -ENOMEM;
+			goto out;
+		}
+		yuv_dma = yi;
+		out_dma = oi;
+		jpeg_smmu_translate(j);
+	} else {
+		smmu_bypass(j);
+	}
 	cvdr_config(j, out_dma, JPGENC_OUT_SIZE, width, height);
 	cvdr_rd_config(j);
 	hw_init(j);
@@ -638,7 +829,7 @@ static int encode_test(struct hisi_jpegenc *j, u32 width, u32 height)
 
 	if (bc) {
 		j->out = out;
-		j->out_dma = out_dma;
+		j->out_dma = out_phys;
 		j->out_size = JPGENC_OUT_SIZE;
 		j->byte_cnt = bc;
 		j->have_image = true;
@@ -650,9 +841,9 @@ static int encode_test(struct hisi_jpegenc *j, u32 width, u32 height)
 
 out:
 	if (out)
-		dma_free_coherent(j->dev, JPGENC_OUT_SIZE, out, out_dma);
+		free_pages_exact(out, JPGENC_OUT_SIZE);
 	if (yuv)
-		dma_free_coherent(j->dev, y_size + uv_size, yuv, yuv_dma);
+		free_pages_exact(yuv, y_size + uv_size);
 	return ret;
 }
 
