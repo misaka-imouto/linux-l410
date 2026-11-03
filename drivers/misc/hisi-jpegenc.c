@@ -110,6 +110,9 @@ MODULE_PARM_DESC(flat, "fill the test frame with constant 128 instead of a gradi
 static uint sync_cfg = 0x5;
 module_param(sync_cfg, uint, 0644);
 MODULE_PARM_DESC(sync_cfg, "JPGENC_SYNCCFG value (source bit0, sram_noopt bit2)");
+static uint prefetch_cfg = 0x974;
+module_param(prefetch_cfg, uint, 0644);
+MODULE_PARM_DESC(prefetch_cfg, "JPGENC_PREFETCH value (vendor PC_DRV: 0x974, EN=bit0)");
 static uint jpeg_config;
 module_param(jpeg_config, uint, 0644);
 MODULE_PARM_DESC(jpeg_config, "JPGENC_JPE_CONFIG_REG value");
@@ -197,7 +200,7 @@ static void hw_init(struct hisi_jpegenc *j)
 {
 	huff_init(j);
 	qtable_init(j);
-	jw(j, JPGENC_PREFETCH, 0);		/* smmu bypass: no prefetch */
+	jw(j, JPGENC_PREFETCH, prefetch_cfg);
 	jw(j, JPGENC_RESTART, 0);
 	jw(j, JPGENC_SYNCCFG, sync_cfg);
 	jw(j, 0x90, jpeg_config);
@@ -692,6 +695,11 @@ static int hisi_jpegenc_power_on(struct hisi_jpegenc *j)
 	writel(0x08000105, j->subctrl + 0x84);
 	writel(0x00000000, j->subctrl + 0x88);
 	writel(0x08000085, j->subctrl + 0x8c);
+	/* SRT port 25 read/write flux (same layout as the RT pair above) */
+	writel(0x00000000, j->subctrl + 0x90);
+	writel(0x08000105, j->subctrl + 0x94);
+	writel(0x00000000, j->subctrl + 0x98);
+	writel(0x08000085, j->subctrl + 0x9c);
 
 	before = readl(j->subctrl + clk_ctl_offset);
 	writel(before | BIT(0), j->subctrl + clk_ctl_offset);
